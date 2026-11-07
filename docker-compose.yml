@@ -1,0 +1,47 @@
+# Local infrastructure that mirrors production: PostgreSQL + MinIO (S3-compatible, private bucket).
+# Usage: docker compose up -d   then set DATABASE_URL / STORAGE_DRIVER=s3 values from server/.env.example
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dms
+      POSTGRES_PASSWORD: dms_dev_password
+      POSTGRES_DB: dms
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dms"]
+      interval: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: dms-minio
+      MINIO_ROOT_PASSWORD: dms-minio-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
+  # Creates the private bucket (no anonymous access).
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3;
+      mc alias set local http://minio:9000 dms-minio dms-minio-secret;
+      mc mb --ignore-existing local/dms-documents;
+      mc anonymous set none local/dms-documents;
+      exit 0;
+      "
+
+volumes:
+  pgdata:
+  miniodata:
