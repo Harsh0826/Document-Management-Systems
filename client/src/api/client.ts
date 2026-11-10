@@ -33,9 +33,17 @@ api.interceptors.request.use((config) => {
 // Single-flight refresh shared by every request that hits a 401 at the same time.
 let refreshing: Promise<{ accessToken: string; user: SessionUser } | null> | null = null;
 
+const postRefresh = () => axios.post('/api/auth/refresh', null, { withCredentials: true, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+
 export function refreshSession() {
-  refreshing ??= axios
-    .post('/api/auth/refresh', null, { withCredentials: true, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+  refreshing ??= postRefresh()
+    .catch(async (err) => {
+      if (axios.isAxiosError(err) && err.response?.status === 409) {
+        await new Promise((r) => setTimeout(r, 400));
+        return postRefresh();
+      }
+      throw err;
+    })
     .then((r) => {
       accessToken = r.data.accessToken;
       return r.data as { accessToken: string; user: SessionUser };

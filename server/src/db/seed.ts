@@ -1,14 +1,11 @@
 /**
  * Bootstrap data. Creates the first administrator from SEED_ADMIN_EMAIL / SEED_ADMIN_PASSWORD when the
- * users table is empty. With SEED_DEMO_DATA=true it also creates a demo client, one staff member and
- * one employee account so both portals can be tried immediately.
- *
- * No documents are ever seeded — every document, statistic and notification comes from real uploads.
+ * users table is empty. With SEED_DEMO_DATA=true it also creates one employee account and four empty
+ * starter folders. No documents are ever seeded — every document comes from a real upload.
  */
 import { env, isProd } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { hashPassword } from '../services/auth.js';
-import { ensureClientRoot, ensureEmployeeRoot } from '../services/folders.js';
 import type { Database, Queryable } from './index.js';
 
 async function createUser(
@@ -51,30 +48,22 @@ export async function seed(database: Database, opts: { force?: boolean } = {}) {
     if (!env.SEED_DEMO_DATA || isProd) return;
     const demoPassword = env.DEMO_PASSWORD ?? env.SEED_ADMIN_PASSWORD!;
 
-    const { rows: client } = await q.query<{ id: string }>(
-      `INSERT INTO clients (name, code, industry, contact_email) VALUES ('Acme Construction Ltd', 'ACME', 'Construction', 'hr@acme.example')
-       ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name RETURNING id`,
-    );
-    const clientId = client[0].id;
-    await ensureClientRoot(clientId, q);
+    await createUser(q, {
+      email: 'employee@dms.local',
+      password: demoPassword,
+      firstName: 'Jordan',
+      lastName: 'Lee',
+      role: 'employee',
+      jobTitle: 'Site Engineer',
+    });
 
-    const staffId = await createUser(q, { email: 'staff@dms.local', password: demoPassword, firstName: 'Sam', lastName: 'Reviewer', role: 'staff', jobTitle: 'Compliance Officer' });
-    await q.query(
-      `INSERT INTO user_permissions (user_id, permission_id)
-       SELECT $1, id FROM permissions WHERE key IN ('documents.download', 'documents.review', 'documents.comment', 'documents.upload', 'requests.manage')
-       ON CONFLICT DO NOTHING`,
-      [staffId],
-    );
-    await q.query(`INSERT INTO staff_client_assignments (staff_user_id, client_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [staffId, clientId]);
-
-    const empUserId = await createUser(q, { email: 'employee@dms.local', password: demoPassword, firstName: 'Jordan', lastName: 'Lee', role: 'employee', jobTitle: 'Site Engineer' });
-    const { rows: emp } = await q.query<{ id: string }>(
-      `INSERT INTO employees (user_id, client_id, employee_number, department, position)
-       VALUES ($1, $2, 'E-1001', 'Engineering', 'Site Engineer')
-       ON CONFLICT (user_id) DO UPDATE SET client_id = EXCLUDED.client_id RETURNING id`,
-      [empUserId, clientId],
-    );
-    await ensureEmployeeRoot(emp[0].id, q);
-    logger.info('Demo accounts created: staff@dms.local (staff), employee@dms.local (employee)');
+    // Starter top-level folders (empty — documents always come from real uploads).
+    const { rows: existing } = await q.query<{ n: number }>('SELECT count(*) AS n FROM library_folders');
+    if (existing[0].n === 0) {
+      for (const name of ['Licences', 'HR Policies', 'Finance', 'Health & Safety']) {
+        await q.query('INSERT INTO library_folders (name, depth) VALUES ($1, 1)', [name]);
+      }
+    }
+    logger.info('Demo account created: employee@dms.local (employee)');
   });
 }

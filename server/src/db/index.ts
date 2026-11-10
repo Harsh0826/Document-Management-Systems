@@ -136,9 +136,7 @@ export async function initDb(opts: { memory?: boolean } = {}): Promise<Database>
     logger.info('Connected to PostgreSQL');
   } else {
     instance = await createPgliteDatabase(opts.memory ? undefined : env.PGLITE_DATA_DIR);
-    logger.warn(
-      opts.memory ? 'Using in-memory PGlite (tests)' : `Using embedded PGlite at ${env.PGLITE_DATA_DIR} — development only`,
-    );
+    logger.warn(opts.memory ? 'Using in-memory PGlite (tests)' : `Using embedded PGlite at ${env.PGLITE_DATA_DIR} — development only`);
   }
   return instance;
 }

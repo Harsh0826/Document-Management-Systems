@@ -4,13 +4,6 @@ export const clientIp = (req: Request) => req.ip ?? req.socket.remoteAddress ?? 
 export const userAgent = (req: Request) => (req.get('user-agent') ?? '').slice(0, 300) || null;
 
 /** Shape of paged list responses. */
-export interface Paged<T> {
-  items: T[];
-  total: number;
-  page: number;
-  pageSize: number;
-}
-
 /**
  * Tiny SQL builder for dynamic WHERE clauses — values are always bound as parameters.
  *   const w = new Where(); w.add('status = ?', 'approved'); w.sql → 'WHERE status = $1'

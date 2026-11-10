@@ -1,19 +1,20 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api, refreshSession, tokenStore } from '@/api/client';
-import type { Permission, SessionUser } from './types';
+import type { SessionUser } from './types';
 
 interface AuthState {
   user: SessionUser | null;
   ready: boolean;
-  login: (email: string, password: string, portal: 'admin' | 'employee') => Promise<SessionUser>;
+  login: (email: string, password: string) => Promise<LoginResult>;
+  verifyMfa: (mfaToken: string, code: string) => Promise<SessionUser>;
+  setSession: (accessToken: string, user: SessionUser) => void;
   logout: () => Promise<void>;
   reload: () => Promise<void>;
-  can: (p: Permission) => boolean;
   isAdmin: boolean;
-  isStaff: boolean;
-  isEmployee: boolean;
 }
+
+export type LoginResult = { mfaRequired: true; mfaToken: string } | { mfaRequired: false; user: SessionUser };
 
 const AuthContext = createContext<AuthState | null>(null);
 
@@ -34,13 +35,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   }, [qc]);
 
-  const login = useCallback(async (email: string, password: string, portal: 'admin' | 'employee') => {
-    const { data } = await api.post<{ accessToken: string; user: SessionUser }>('/auth/login', { email, password, portal });
-    tokenStore.set(data.accessToken);
-    qc.clear();
-    setUser(data.user);
-    return data.user;
-  }, [qc]);
+  const setSession = useCallback(
+    (accessToken: string, u: SessionUser) => {
+      tokenStore.set(accessToken);
+      qc.clear();
+      setUser(u);
+    },
+    [qc],
+  );
+
+  /** Step 1: password. Returns either a signed-in user or an MFA challenge. */
+  const login = useCallback(
+    async (email: string, password: string): Promise<LoginResult> => {
+      const { data } = await api.post<{ accessToken?: string; user?: SessionUser; mfaRequired?: boolean; mfaToken?: string }>('/auth/login', {
+        email,
+        password,
+      });
+      if (data.mfaRequired && data.mfaToken) return { mfaRequired: true, mfaToken: data.mfaToken };
+      setSession(data.accessToken!, data.user!);
+      return { mfaRequired: false, user: data.user! };
+    },
+    [setSession],
+  );
+
+  /** Step 2: authenticator or recovery code. */
+  const verifyMfa = useCallback(
+    async (mfaToken: string, code: string) => {
+      const { data } = await api.post<{ accessToken: string; user: SessionUser }>('/auth/login/mfa', { mfaToken, code });
+      setSession(data.accessToken, data.user);
+      return data.user;
+    },
+    [setSession],
+  );
 
   const logout = useCallback(async () => {
     await api.post('/auth/logout').catch(() => undefined);
@@ -59,14 +85,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       ready,
       login,
+      verifyMfa,
+      setSession,
       logout,
       reload,
-      can: (p) => !!user?.permissions.includes(p),
       isAdmin: user?.role === 'admin',
-      isStaff: user?.role === 'staff',
-      isEmployee: user?.role === 'employee',
     }),
-    [user, ready, login, logout, reload],
+    [user, ready, login, verifyMfa, setSession, logout, reload],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

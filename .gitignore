@@ -9,3 +9,4 @@ coverage/
 *.log
 .DS_Store
 *.tsbuildinfo
+server/storage-migration-report-*.json

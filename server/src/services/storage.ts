@@ -3,10 +3,11 @@
  *  - s3:    objects in a private bucket, SSE enabled, short-lived presigned GET URLs.
  *  - local: dev-only; files kept outside the web root, served via HMAC-signed expiring URLs.
  */
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createReadStream, existsSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { dirname, resolve, sep } from 'node:path';
 import { env } from '../config/env.js';
 import { hmac, safeEqual } from '../lib/crypto.js';
@@ -23,7 +24,26 @@ export interface StorageDriver {
   put(key: string, body: Buffer, contentType: string): Promise<void>;
   delete(key: string): Promise<void>;
   signedUrl(key: string, opts: SignedUrlOptions): Promise<{ url: string; expiresAt: Date }>;
+  /** Size and recorded SHA-256 (hex) of a stored object, or null when it does not exist. */
+  head(key: string): Promise<{ size: number; sha256: string | null } | null>;
+  /** Full object contents, or null when it does not exist. */
+  read(key: string): Promise<Buffer | null>;
 }
+
+export interface S3Options {
+  bucket: string;
+  region: string;
+  endpoint?: string;
+  forcePathStyle?: boolean;
+  kmsKeyId?: string;
+  /** Explicit keys; when omitted the AWS default credential chain (profile, env, task role) is used. */
+  credentials?: { accessKeyId: string; secretAccessKey: string };
+}
+
+const isNotFound = (err: unknown) => {
+  const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+  return e?.name === 'NotFound' || e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404;
+};
 
 /** RFC 6266 Content-Disposition with an ASCII fallback and UTF-8 filename*. */
 export function contentDisposition(disposition: 'inline' | 'attachment', filename: string) {
@@ -32,27 +52,62 @@ export function contentDisposition(disposition: 'inline' | 'attachment', filenam
 }
 
 // ---- S3 -------------------------------------------------------------------------------
-class S3Storage implements StorageDriver {
+export class S3Storage implements StorageDriver {
   readonly name = 's3' as const;
-  private client = new S3Client({
-    region: env.AWS_REGION,
-    endpoint: env.S3_ENDPOINT,
-    forcePathStyle: env.S3_FORCE_PATH_STYLE,
-  });
-  private bucket = env.S3_BUCKET!;
+  private client: S3Client;
+  readonly bucket: string;
+  readonly region: string;
+  private kmsKeyId?: string;
+  private endpoint?: string;
+
+  constructor(o: S3Options) {
+    this.client = new S3Client({ region: o.region, endpoint: o.endpoint, forcePathStyle: o.forcePathStyle, credentials: o.credentials });
+    this.bucket = o.bucket;
+    this.region = o.region;
+    this.kmsKeyId = o.kmsKeyId;
+    this.endpoint = o.endpoint;
+  }
+
+  /** Origin that presigned URLs point at (allowed in the CSP for in-app previews). */
+  get origin(): string {
+    return this.endpoint ? new URL(this.endpoint).origin : `https://${this.bucket}.s3.${this.region}.amazonaws.com`;
+  }
 
   async put(key: string, body: Buffer, contentType: string) {
+    const digest = createHash('sha256').update(body).digest();
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
         Body: body,
         ContentType: contentType,
-        ...(env.S3_KMS_KEY_ID
-          ? { ServerSideEncryption: 'aws:kms', SSEKMSKeyId: env.S3_KMS_KEY_ID }
-          : { ServerSideEncryption: 'AES256' }),
+        // S3 recomputes the SHA-256 and rejects the upload if the bytes were corrupted in transit.
+        ChecksumAlgorithm: 'SHA256',
+        ChecksumSHA256: digest.toString('base64'),
+        Metadata: { sha256: digest.toString('hex') },
+        ...(this.kmsKeyId ? { ServerSideEncryption: 'aws:kms', SSEKMSKeyId: this.kmsKeyId } : { ServerSideEncryption: 'AES256' }),
       }),
     );
+  }
+
+  async head(key: string) {
+    try {
+      const r = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      return { size: Number(r.ContentLength ?? 0), sha256: r.Metadata?.sha256 ?? null };
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
+  }
+
+  async read(key: string) {
+    try {
+      const r = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      return Buffer.from(await r.Body!.transformToByteArray());
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
   }
 
   async delete(key: string) {
@@ -84,9 +139,13 @@ export interface LocalFileClaims {
   d: 'inline' | 'attachment';
 }
 
-class LocalStorage implements StorageDriver {
+export class LocalStorage implements StorageDriver {
   readonly name = 'local' as const;
-  readonly root = resolve(env.LOCAL_STORAGE_DIR);
+  readonly root: string;
+
+  constructor(dir: string = env.LOCAL_STORAGE_DIR) {
+    this.root = resolve(dir);
+  }
 
   /** Resolves a key under the storage root, refusing anything that escapes it. */
   pathFor(key: string) {
@@ -103,6 +162,23 @@ class LocalStorage implements StorageDriver {
 
   async delete(key: string) {
     await rm(this.pathFor(key), { force: true });
+  }
+
+  async head(key: string) {
+    try {
+      const st = await stat(this.pathFor(key));
+      return { size: st.size, sha256: null };
+    } catch {
+      return null;
+    }
+  }
+
+  async read(key: string) {
+    try {
+      return await readFile(this.pathFor(key));
+    } catch {
+      return null;
+    }
   }
 
   async signedUrl(key: string, o: SignedUrlOptions) {
@@ -132,10 +208,33 @@ class LocalStorage implements StorageDriver {
   }
 }
 
+/** S3 driver configured from S3_* / AWS_* environment variables (credentials come from the AWS default chain). */
+export function createS3StorageFromEnv(): S3Storage {
+  if (!env.S3_BUCKET) throw new Error('S3_BUCKET is not set');
+  return new S3Storage({
+    bucket: env.S3_BUCKET,
+    region: env.AWS_REGION,
+    endpoint: env.S3_ENDPOINT,
+    forcePathStyle: env.S3_FORCE_PATH_STYLE,
+    kmsKeyId: env.S3_KMS_KEY_ID,
+  });
+}
+
 let driver: StorageDriver | null = null;
 export function storage(): StorageDriver {
-  driver ??= env.STORAGE_DRIVER === 's3' ? new S3Storage() : new LocalStorage();
+  driver ??= env.STORAGE_DRIVER === 's3' ? createS3StorageFromEnv() : new LocalStorage();
   return driver;
+}
+
+/** Switches the active storage at runtime (after an admin moves files to S3 from the settings screen). */
+export function setActiveStorage(next: StorageDriver) {
+  driver = next;
+}
+
+/** Extra origin the browser may load previews from, when files are served from S3. */
+export function activeStorageOrigin(): string | null {
+  const d = storage();
+  return d instanceof S3Storage ? d.origin : null;
 }
 
 export function localStorageDriver(): LocalStorage | null {

@@ -1,122 +1,102 @@
-/**
- * TanStack Query hooks for every server resource. Components never call axios directly.
- */
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { cleanParams } from '@/lib/utils';
-import type {
-  AuditEntry,
-  Category,
-  Client,
-  Dashboard,
-  DocComment,
-  DocumentDetail,
-  DocumentItem,
-  DocumentRequest,
-  Employee,
-  Folder,
-  FolderDetail,
-  NotificationItem,
-  Paged,
-  Permission,
-  PermissionInfo,
-  UserDetail,
-  UserListItem,
-} from '@/lib/types';
+/** TanStack Query hooks for the company library and People. Components never call axios directly. */
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { FilePage, FileQuery, FolderDetail, HomeData, LibraryFile, LibraryFolder, Person } from '@/lib/types';
 import { api } from './client';
 
 export const qk = {
-  dashboard: ['dashboard'] as const,
-  documents: (f?: object) => ['documents', f ?? {}] as const,
-  document: (id: string) => ['document', id] as const,
-  documentHistory: (id: string) => ['document', id, 'history'] as const,
-  categories: ['categories'] as const,
-  clients: ['clients'] as const,
-  employees: (f?: object) => ['employees', f ?? {}] as const,
-  folders: (clientId?: string) => ['folders', clientId ?? 'all'] as const,
-  folder: (id: string) => ['folder', id] as const,
-  users: (f?: object) => ['users', f ?? {}] as const,
-  user: (id: string) => ['user', id] as const,
-  permissions: ['permissions'] as const,
-  notifications: (f?: object) => ['notifications', f ?? {}] as const,
-  unread: ['notifications', 'unread'] as const,
-  audit: (f?: object) => ['audit', f ?? {}] as const,
-  auditActions: ['audit', 'actions'] as const,
-  requests: (f?: object) => ['requests', f ?? {}] as const,
-  me: ['me'] as const,
+  home: ['library', 'home'] as const,
+  folder: (id: string) => ['library', 'folder', id] as const,
+  folders: (parent: string | null) => ['library', 'folders', parent ?? 'top'] as const,
+  findFolders: (q: string) => ['library', 'find-folders', q] as const,
+  files: (f: FileQuery) => ['library', 'files', f] as const,
+  file: (id: string) => ['library', 'file', id] as const,
+  quick: (q: string) => ['library', 'quick', q] as const,
+  pins: ['library', 'pins'] as const,
+  expiry: ['library', 'expiry'] as const,
+  deleted: ['library', 'deleted'] as const,
+  people: ['people'] as const,
 };
 
-/** Invalidates everything that depends on document state. */
-function useInvalidateDocs() {
-  const qc = useQueryClient();
-  return () =>
-    Promise.all([
-      qc.invalidateQueries({ queryKey: ['documents'] }),
-      qc.invalidateQueries({ queryKey: ['document'] }),
-      qc.invalidateQueries({ queryKey: qk.dashboard }),
-      qc.invalidateQueries({ queryKey: ['folders'] }),
-      qc.invalidateQueries({ queryKey: ['folder'] }),
-      qc.invalidateQueries({ queryKey: ['notifications'] }),
-      qc.invalidateQueries({ queryKey: ['requests'] }),
-      qc.invalidateQueries({ queryKey: ['employees'] }),
-    ]);
-}
+/** How many documents a list loads at a time. */
+export const PAGE_SIZE = 50;
 
-// ---------------------------------------------------------------- dashboard
-export const useDashboard = () =>
-  useQuery({ queryKey: qk.dashboard, queryFn: async () => (await api.get<Dashboard>('/dashboard')).data, refetchInterval: 60_000 });
+// ---------------------------------------------------------------- reading
+export const useHome = () => useQuery({ queryKey: qk.home, queryFn: async () => (await api.get<HomeData>('/library/home')).data });
 
-// ---------------------------------------------------------------- documents
-export interface DocumentFilters {
-  q?: string;
-  clientId?: string;
-  employeeId?: string;
-  categoryId?: string[];
-  fileType?: string[];
-  status?: string[];
-  uploadedBy?: string;
-  uploadedFrom?: string;
-  uploadedTo?: string;
-  expiryFrom?: string;
-  expiryTo?: string;
-  expiringWithin?: number;
-  folderId?: string;
-  includeSubfolders?: boolean;
-  archived?: 'exclude' | 'only' | 'include';
-  sort?: string;
-  order?: 'asc' | 'desc';
-  page?: number;
-  pageSize?: number;
-}
-
-export const useDocuments = (f: DocumentFilters, enabled = true) =>
+export const useFolder = (id: string | undefined) =>
   useQuery({
-    queryKey: qk.documents(f),
-    queryFn: async () => (await api.get<Paged<DocumentItem>>('/documents', { params: cleanParams({ ...f, includeSubfolders: f.includeSubfolders ? 'true' : undefined }) })).data,
+    queryKey: qk.folder(id ?? ''),
+    queryFn: async () => (await api.get<FolderDetail>(`/library/folders/${id}`)).data,
+    enabled: !!id,
+  });
+
+/** One level of folders (top level when `parent` is null), loaded only when needed. */
+export const useFolders = (parent: string | null, enabled = true) =>
+  useQuery({
+    queryKey: qk.folders(parent),
+    queryFn: async () => (await api.get<{ folders: LibraryFolder[] }>('/library/folders', { params: parent ? { parent } : {} })).data.folders,
+    enabled,
+    staleTime: 30_000,
+  });
+
+/** Expired and expiring-soon counts for the navigation bar. */
+export const useExpiryCounts = () =>
+  useQuery({ queryKey: qk.expiry, queryFn: async () => (await api.get<{ expired: number; soon: number }>('/library/expiry')).data, staleTime: 60_000 });
+
+/** Your pinned folders (sidebar). */
+export const usePins = () =>
+  useQuery({ queryKey: qk.pins, queryFn: async () => (await api.get<{ folders: LibraryFolder[] }>('/library/pins')).data.folders, staleTime: 30_000 });
+
+/** Folders anywhere in the library whose name matches. */
+export const useFindFolders = (q: string) =>
+  useQuery({
+    queryKey: qk.findFolders(q),
+    queryFn: async () => (await api.get<{ folders: LibraryFolder[] }>('/library/folders', { params: { q } })).data.folders,
+    enabled: q.trim().length > 0,
+    placeholderData: keepPreviousData,
+  });
+
+const fileParams = (f: FileQuery) => {
+  const p: Record<string, string> = {};
+  for (const [k, v] of Object.entries(f)) if (v !== undefined && v !== '' && v !== false) p[k] = v === true ? '1' : String(v);
+  return p;
+};
+
+/** Documents, a page at a time; the next page loads as you scroll. */
+export const useFiles = (f: FileQuery, enabled = true) =>
+  useInfiniteQuery({
+    queryKey: qk.files(f),
+    queryFn: async ({ pageParam }) => (await api.get<FilePage>('/library/files', { params: { ...fileParams(f), offset: pageParam, limit: PAGE_SIZE } })).data,
+    initialPageParam: 0,
+    getNextPageParam: (last) => last.nextOffset ?? undefined,
     placeholderData: keepPreviousData,
     enabled,
   });
 
-export const useDocument = (id: string | undefined) =>
-  useQuery({ queryKey: qk.document(id ?? ''), queryFn: async () => (await api.get<DocumentDetail>(`/documents/${id}`)).data, enabled: !!id });
+export const useFile = (id: string | undefined) =>
+  useQuery({ queryKey: qk.file(id ?? ''), queryFn: async () => (await api.get<LibraryFile>(`/library/files/${id}`)).data, enabled: !!id });
 
-export const useDocumentHistory = (id: string, enabled: boolean) =>
+/** Suggestions while typing: the best few folders and documents. */
+export const useQuickSearch = (q: string) =>
   useQuery({
-    queryKey: qk.documentHistory(id),
-    queryFn: async () => (await api.get<{ id: string; action: string; metadata: Record<string, any>; createdAt: string; actorName: string | null; ip: string | null }[]>(`/documents/${id}/history`)).data,
-    enabled,
+    queryKey: qk.quick(q),
+    queryFn: async ({ signal }) =>
+      (await api.get<{ q: string; folders: LibraryFolder[]; files: LibraryFile[]; moreFiles: boolean }>('/library/search', { params: { q, limit: 6 }, signal }))
+        .data,
+    enabled: q.trim().length > 0,
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
   });
 
-export async function getDocumentUrl(id: string, disposition: 'inline' | 'attachment', versionId?: string) {
-  return (
-    await api.get<{ url: string; expiresAt: string; filename: string; mimeType: string; previewable: boolean; disposition: string }>(`/documents/${id}/url`, {
-      params: cleanParams({ disposition, versionId }),
-    })
-  ).data;
+export const useDeleted = () => useQuery({ queryKey: qk.deleted, queryFn: async () => (await api.get<LibraryFile[]>('/library/deleted')).data });
+
+export async function getFileUrl(id: string, disposition: 'inline' | 'attachment') {
+  return (await api.get<{ url: string; expiresAt: string; filename: string; inline: boolean }>(`/library/files/${id}/url`, { params: { disposition } })).data;
 }
 
-/** Downloads via a short-lived signed URL (the browser never sees a permanent link). */
-export async function downloadDocument(id: string, versionId?: string) {
-  const { url } = await getDocumentUrl(id, 'attachment', versionId);
+/** Starts a download through a short-lived link (the browser never gets a permanent address). */
+export async function downloadFile(id: string) {
+  const { url } = await getFileUrl(id, 'attachment');
   const a = document.createElement('a');
   a.href = url;
   a.rel = 'noopener';
@@ -125,315 +105,127 @@ export async function downloadDocument(id: string, versionId?: string) {
   a.remove();
 }
 
-export interface UploadInput {
-  file: File;
-  title: string;
-  description?: string;
-  categoryId?: string;
-  employeeId?: string;
-  folderId?: string;
-  requestId?: string;
-  issueDate?: string;
-  expiryDate?: string;
-}
-
-export async function uploadDocument(input: UploadInput, onProgress: (pct: number) => void, signal?: AbortSignal) {
-  const fd = new FormData();
-  for (const [k, v] of Object.entries(input)) if (k !== 'file' && v) fd.append(k, String(v));
-  fd.append('file', input.file);
-  return (
-    await api.post<DocumentItem>('/documents', fd, {
-      signal,
-      onUploadProgress: (e) => e.total && onProgress(Math.round((e.loaded / e.total) * 100)),
-    })
-  ).data;
-}
-
-export async function uploadVersion(id: string, input: { file: File; issueDate?: string; expiryDate?: string; changeNote?: string }, onProgress: (pct: number) => void) {
-  const fd = new FormData();
-  for (const [k, v] of Object.entries(input)) if (k !== 'file' && v) fd.append(k, String(v));
-  fd.append('file', input.file);
-  return (await api.post<DocumentItem>(`/documents/${id}/versions`, fd, { onUploadProgress: (e) => e.total && onProgress(Math.round((e.loaded / e.total) * 100)) })).data;
-}
-
-export function useInvalidateDocuments() {
-  return useInvalidateDocs();
-}
-
-export function useUpdateDocument(id: string) {
-  const inv = useInvalidateDocs();
-  return useMutation({
-    mutationFn: async (body: Partial<{ title: string; description: string | null; categoryId: string | null; issueDate: string | null; expiryDate: string | null; folderId: string }>) =>
-      (await api.patch<DocumentItem>(`/documents/${id}`, body)).data,
-    onSuccess: inv,
-  });
-}
-
-export function useReviewDocument() {
-  const inv = useInvalidateDocs();
-  return useMutation({
-    mutationFn: async ({ id, decision, comment }: { id: string; decision: 'approved' | 'rejected' | 'renewal_required'; comment?: string }) =>
-      (await api.post<DocumentItem>(`/documents/${id}/review`, { decision, comment })).data,
-    onSuccess: inv,
-  });
-}
-
-export function useArchiveDocument() {
-  const inv = useInvalidateDocs();
-  return useMutation({
-    mutationFn: async ({ id, archived }: { id: string; archived: boolean }) => (await api.post<DocumentItem>(`/documents/${id}/${archived ? 'archive' : 'unarchive'}`)).data,
-    onSuccess: inv,
-  });
-}
-
-export function useDeleteDocument() {
-  const inv = useInvalidateDocs();
-  return useMutation({ mutationFn: async (id: string) => api.delete(`/documents/${id}`), onSuccess: inv });
-}
-
-export function useMoveDocuments() {
-  const inv = useInvalidateDocs();
-  return useMutation({
-    mutationFn: async (b: { documentIds: string[]; folderId: string }) => (await api.post<{ moved: number }>('/documents/move', b)).data,
-    onSuccess: inv,
-  });
-}
-
-export function useAddComment(id: string) {
+// ---------------------------------------------------------------- managing (administrators)
+function useInvalidateLibrary() {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (b: { body: string; isInternal: boolean }) => (await api.post<DocComment>(`/documents/${id}/comments`, b)).data,
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.document(id) }),
-  });
-}
-
-// ---------------------------------------------------------------- reference data
-export const useCategories = () =>
-  useQuery({ queryKey: qk.categories, queryFn: async () => (await api.get<Category[]>('/categories')).data, staleTime: 5 * 60_000 });
-
-export const useClients = (includeInactive = false) =>
-  useQuery({
-    queryKey: [...qk.clients, includeInactive],
-    queryFn: async () => (await api.get<Client[]>('/clients', { params: includeInactive ? { includeInactive: 'true' } : {} })).data,
-    staleTime: 60_000,
-  });
-
-export const useEmployees = (f: { q?: string; clientId?: string; page?: number; pageSize?: number } = {}, enabled = true) =>
-  useQuery({
-    queryKey: qk.employees(f),
-    queryFn: async () => (await api.get<Paged<Employee>>('/employees', { params: cleanParams({ pageSize: 500, ...f }) })).data,
-    placeholderData: keepPreviousData,
-    enabled,
-  });
-
-export function useSaveCategory() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async ({ id, ...body }: Partial<Category> & { name: string }) =>
-      id ? (await api.patch<Category>(`/categories/${id}`, body)).data : (await api.post<Category>('/categories', body)).data,
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.categories }),
-  });
-}
-
-export function useDeleteCategory() {
-  const qc = useQueryClient();
-  return useMutation({ mutationFn: async (id: string) => api.delete(`/categories/${id}`), onSuccess: () => qc.invalidateQueries({ queryKey: qk.categories }) });
-}
-
-export function useSaveClient() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async ({ id, ...body }: { id?: string; name: string; code: string; industry?: string | null; contactEmail?: string | null; isActive?: boolean }) =>
-      id ? (await api.patch<Client>(`/clients/${id}`, body)).data : (await api.post<Client>('/clients', body)).data,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.clients });
-      qc.invalidateQueries({ queryKey: ['folders'] });
-    },
-  });
-}
-
-// ---------------------------------------------------------------- folders
-export const useFolders = (clientId?: string) =>
-  useQuery({ queryKey: qk.folders(clientId), queryFn: async () => (await api.get<Folder[]>('/folders', { params: cleanParams({ clientId }) })).data });
-
-export const useFolder = (id: string | undefined) =>
-  useQuery({ queryKey: qk.folder(id ?? ''), queryFn: async () => (await api.get<FolderDetail>(`/folders/${id}`)).data, enabled: !!id });
-
-function useInvalidateFolders() {
-  const qc = useQueryClient();
-  return () => Promise.all([qc.invalidateQueries({ queryKey: ['folders'] }), qc.invalidateQueries({ queryKey: ['folder'] }), qc.invalidateQueries({ queryKey: ['documents'] })]);
+  return () => qc.invalidateQueries({ queryKey: ['library'] });
 }
 
 export function useCreateFolder() {
-  const inv = useInvalidateFolders();
-  return useMutation({ mutationFn: async (b: { name: string; parentId: string }) => (await api.post<Folder>('/folders', b)).data, onSuccess: inv });
+  const inv = useInvalidateLibrary();
+  return useMutation({
+    mutationFn: async (b: { name: string; parentId?: string | null }) => (await api.post<LibraryFolder>('/library/folders', b)).data,
+    onSuccess: inv,
+  });
 }
 
 export function useUpdateFolder() {
-  const inv = useInvalidateFolders();
+  const inv = useInvalidateLibrary();
   return useMutation({
-    mutationFn: async ({ id, ...b }: { id: string; name?: string; parentId?: string }) => (await api.patch<Folder>(`/folders/${id}`, b)).data,
+    mutationFn: async ({ id, ...b }: { id: string; name?: string; parentId?: string | null }) =>
+      (await api.patch<LibraryFolder>(`/library/folders/${id}`, b)).data,
     onSuccess: inv,
+  });
+}
+
+export function useBulkFiles() {
+  const inv = useInvalidateLibrary();
+  return useMutation({
+    mutationFn: async (b: { action: 'move' | 'delete'; ids: string[]; folderId?: string }) =>
+      (await api.post<{ done: number; skipped: { id: string; name: string; reason: string }[]; notFound: number }>('/library/files/bulk', b)).data,
+    onSuccess: inv,
+  });
+}
+
+/** Pin or unpin a folder on your Home page. Updates the screen at once, then confirms with the server. */
+export function usePinFolder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, pinned }: { id: string; pinned: boolean }) =>
+      pinned ? api.put(`/library/folders/${id}/pin`) : api.delete(`/library/folders/${id}/pin`),
+    onMutate: ({ id, pinned }) => {
+      qc.setQueryData<FolderDetail>(qk.folder(id), (f) => (f ? { ...f, pinned } : f));
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['library'] }),
   });
 }
 
 export function useDeleteFolder() {
-  const inv = useInvalidateFolders();
+  const inv = useInvalidateLibrary();
+  return useMutation({ mutationFn: async (id: string) => api.delete(`/library/folders/${id}`), onSuccess: inv });
+}
+
+export async function uploadLibraryFile(input: { file: File; folderId: string; name?: string; validUntil?: string }, onProgress: (pct: number) => void) {
+  const fd = new FormData();
+  fd.append('folderId', input.folderId);
+  if (input.name) fd.append('name', input.name);
+  if (input.validUntil) fd.append('validUntil', input.validUntil);
+  fd.append('file', input.file);
+  return (await api.post<LibraryFile>('/library/files', fd, { onUploadProgress: (e) => e.total && onProgress(Math.round((e.loaded / e.total) * 100)) })).data;
+}
+
+export function useUpdateFile() {
+  const inv = useInvalidateLibrary();
   return useMutation({
-    mutationFn: async ({ id, moveContents }: { id: string; moveContents: boolean }) =>
-      (await api.delete<{ movedDocuments: number; movedFolders: number; parentId: string }>(`/folders/${id}`, { params: moveContents ? { moveContentsToParent: 'true' } : {} })).data,
+    mutationFn: async ({ id, ...b }: { id: string; name?: string; folderId?: string; validUntil?: string | null }) =>
+      (await api.patch<LibraryFile>(`/library/files/${id}`, b)).data,
     onSuccess: inv,
   });
 }
 
-// ---------------------------------------------------------------- users
-export const useUsers = (f: { q?: string; role?: string; status?: string; clientId?: string; page?: number; pageSize?: number }, enabled = true) =>
-  useQuery({
-    queryKey: qk.users(f),
-    queryFn: async () => (await api.get<Paged<UserListItem>>('/users', { params: cleanParams(f) })).data,
-    placeholderData: keepPreviousData,
-    enabled,
-  });
-
-export const useUser = (id: string | undefined) =>
-  useQuery({ queryKey: qk.user(id ?? ''), queryFn: async () => (await api.get<UserDetail>(`/users/${id}`)).data, enabled: !!id });
-
-export const usePermissions = () =>
-  useQuery({ queryKey: qk.permissions, queryFn: async () => (await api.get<PermissionInfo[]>('/users/permissions')).data, staleTime: Infinity });
-
-function useInvalidateUsers() {
-  const qc = useQueryClient();
-  return () => Promise.all([qc.invalidateQueries({ queryKey: ['users'] }), qc.invalidateQueries({ queryKey: ['user'] }), qc.invalidateQueries({ queryKey: ['employees'] }), qc.invalidateQueries({ queryKey: qk.clients })]);
-}
-
-export interface CreateUserInput {
-  email: string;
-  firstName: string;
-  lastName: string;
-  role: 'admin' | 'staff' | 'employee';
-  phone?: string;
-  jobTitle?: string;
-  clientId?: string;
-  employeeNumber?: string;
-  department?: string;
-  position?: string;
-  hireDate?: string;
-  permissions?: Permission[];
-  clientIds?: string[];
-  password?: string;
-}
-
-export function useCreateUser() {
-  const inv = useInvalidateUsers();
+export function useReplaceFile() {
+  const inv = useInvalidateLibrary();
   return useMutation({
-    mutationFn: async (b: CreateUserInput) => (await api.post<{ user: UserDetail; inviteUrl: string | null; inviteExpiresInHours: number | null }>('/users', b)).data,
-    onSuccess: inv,
-  });
-}
-
-export function useUpdateUser(id: string) {
-  const inv = useInvalidateUsers();
-  return useMutation({ mutationFn: async (b: Record<string, unknown>) => (await api.patch<UserDetail>(`/users/${id}`, b)).data, onSuccess: inv });
-}
-
-export function useUserAction() {
-  const inv = useInvalidateUsers();
-  return useMutation({
-    mutationFn: async ({ id, action }: { id: string; action: 'deactivate' | 'activate' | 'invite' }) => (await api.post(`/users/${id}/${action}`)).data,
-    onSuccess: inv,
-  });
-}
-
-export function useSetPermissions(id: string) {
-  const inv = useInvalidateUsers();
-  return useMutation({ mutationFn: async (permissions: Permission[]) => (await api.put<UserDetail>(`/users/${id}/permissions`, { permissions })).data, onSuccess: inv });
-}
-
-export function useSetClients(id: string) {
-  const inv = useInvalidateUsers();
-  return useMutation({ mutationFn: async (clientIds: string[]) => (await api.put<UserDetail>(`/users/${id}/clients`, { clientIds })).data, onSuccess: inv });
-}
-
-// ---------------------------------------------------------------- requests
-export const useRequests = (f: { status?: string; employeeId?: string; clientId?: string; page?: number; pageSize?: number }) =>
-  useQuery({
-    queryKey: qk.requests(f),
-    queryFn: async () => (await api.get<Paged<DocumentRequest>>('/requests', { params: cleanParams(f) })).data,
-    placeholderData: keepPreviousData,
-  });
-
-export function useCreateRequest() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (b: { employeeIds: string[]; categoryId?: string | null; title: string; instructions?: string; dueDate?: string }) =>
-      (await api.post<DocumentRequest[]>('/requests', b)).data,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['requests'] });
-      qc.invalidateQueries({ queryKey: ['employees'] });
-      qc.invalidateQueries({ queryKey: qk.dashboard });
+    mutationFn: async ({ id, file, validUntil }: { id: string; file: File; validUntil?: string | null }) => {
+      const fd = new FormData();
+      if (validUntil !== undefined) fd.append('validUntil', validUntil ?? '');
+      fd.append('file', file);
+      return (await api.post<LibraryFile>(`/library/files/${id}/replace`, fd)).data;
     },
+    onSuccess: inv,
   });
 }
 
-export function useCancelRequest() {
+export function useDeleteFile() {
+  const inv = useInvalidateLibrary();
+  return useMutation({ mutationFn: async (id: string) => api.delete(`/library/files/${id}`), onSuccess: inv });
+}
+
+export function useRestoreFile() {
+  const inv = useInvalidateLibrary();
+  return useMutation({ mutationFn: async (id: string) => (await api.post<LibraryFile>(`/library/files/${id}/restore`)).data, onSuccess: inv });
+}
+
+// ---------------------------------------------------------------- people (administrators)
+export const usePeople = () => useQuery({ queryKey: qk.people, queryFn: async () => (await api.get<Person[]>('/people')).data });
+
+function useInvalidatePeople() {
   const qc = useQueryClient();
+  return () => qc.invalidateQueries({ queryKey: qk.people });
+}
+
+export function useAddPerson() {
+  const inv = useInvalidatePeople();
   return useMutation({
-    mutationFn: async (id: string) => (await api.post<DocumentRequest>(`/requests/${id}/cancel`)).data,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['requests'] });
-      qc.invalidateQueries({ queryKey: qk.dashboard });
-    },
+    mutationFn: async (b: { firstName: string; lastName: string; email: string; isAdmin: boolean }) =>
+      (await api.post<{ person: Person; inviteUrl: string; expiresInHours: number }>('/people', b)).data,
+    onSuccess: inv,
   });
 }
 
-// ---------------------------------------------------------------- notifications
-export const useNotifications = (f: { unreadOnly?: boolean; page?: number; pageSize?: number } = {}) =>
-  useQuery({
-    queryKey: qk.notifications(f),
-    queryFn: async () =>
-      (await api.get<Paged<NotificationItem> & { unread: number }>('/notifications', { params: cleanParams({ ...f, unreadOnly: f.unreadOnly ? 'true' : undefined }) })).data,
-    refetchInterval: 30_000,
-    placeholderData: keepPreviousData,
-  });
-
-export function useMarkRead() {
-  const qc = useQueryClient();
+export function usePersonAction() {
+  const inv = useInvalidatePeople();
   return useMutation({
-    mutationFn: async (id: string | 'all') => (id === 'all' ? api.post('/notifications/read-all') : api.post(`/notifications/${id}/read`)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['notifications'] }),
+    mutationFn: async ({ id, action }: { id: string; action: 'reset-password' | 'remove' | 'restore' | 'reset-two-step' }) =>
+      (await api.post(`/people/${id}/${action}`)).data,
+    onSuccess: inv,
   });
 }
 
-// ---------------------------------------------------------------- audit
-export const useAuditLogs = (f: Record<string, string | number | undefined>) =>
-  useQuery({
-    queryKey: qk.audit(f),
-    queryFn: async () => (await api.get<Paged<AuditEntry>>('/audit-logs', { params: cleanParams(f) })).data,
-    placeholderData: keepPreviousData,
+export function useSetAdmin() {
+  const inv = useInvalidatePeople();
+  return useMutation({
+    mutationFn: async ({ id, isAdmin }: { id: string; isAdmin: boolean }) => (await api.patch<Person>(`/people/${id}`, { isAdmin })).data,
+    onSuccess: inv,
   });
-
-export const useAuditActions = () => useQuery({ queryKey: qk.auditActions, queryFn: async () => (await api.get<string[]>('/audit-logs/actions')).data });
-
-// ---------------------------------------------------------------- profile
-export const useMe = () =>
-  useQuery({
-    queryKey: qk.me,
-    queryFn: async () =>
-      (
-        await api.get<{
-          user: unknown;
-          profile: {
-            phone: string | null;
-            jobTitle: string | null;
-            lastLoginAt: string | null;
-            createdAt: string;
-            employeeNumber: string | null;
-            department: string | null;
-            position: string | null;
-            hireDate: string | null;
-            clientId: string | null;
-            clientName: string | null;
-          };
-        }>('/auth/me')
-      ).data,
-  });
+}

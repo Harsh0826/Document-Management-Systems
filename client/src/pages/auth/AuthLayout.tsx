@@ -1,12 +1,11 @@
-import { BellRing, CalendarClock, FileCheck2, Lock, ShieldCheck } from 'lucide-react';
+import { Download, Lock, Search, ShieldCheck } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { APP_NAME } from '@/lib/utils';
 
 const FEATURES = [
-  { icon: Lock, title: 'Private, encrypted storage', text: 'Documents live in a private bucket and are only reachable through short-lived signed links.' },
-  { icon: FileCheck2, title: 'Review & approval workflow', text: 'Every certificate is reviewed, approved or returned with feedback.' },
-  { icon: CalendarClock, title: 'Expiry tracking', text: 'Automatic 90/60/30-day reminders before a certificate lapses.' },
-  { icon: BellRing, title: 'Full audit trail', text: 'Every view, download and change is recorded.' },
+  { icon: Search, title: 'Find it fast', text: 'Search or open a folder to find any company document or licence.' },
+  { icon: Download, title: 'View or download', text: 'Every file has the same two buttons: View and Download.' },
+  { icon: Lock, title: 'Private and secure', text: 'Only people at the company can sign in. Every view and download is recorded.' },
 ];
 
 export function AuthLayout({ children, eyebrow }: { children: ReactNode; eyebrow?: string }) {
@@ -23,7 +22,7 @@ export function AuthLayout({ children, eyebrow }: { children: ReactNode; eyebrow
         </div>
         <div className="relative mt-auto max-w-lg">
           {eyebrow && <div className="mb-3 text-sm font-medium uppercase tracking-wider text-blue-300">{eyebrow}</div>}
-          <h1 className="text-4xl font-semibold leading-tight tracking-tight">Employee documents and certificates, organised and compliant.</h1>
+          <h1 className="text-4xl font-semibold leading-tight tracking-tight">The company's documents and licences, in one place.</h1>
           <ul className="mt-10 space-y-5">
             {FEATURES.map((f) => (
               <li key={f.title} className="flex gap-4">
@@ -38,7 +37,9 @@ export function AuthLayout({ children, eyebrow }: { children: ReactNode; eyebrow
             ))}
           </ul>
         </div>
-        <div className="relative mt-12 text-xs text-slate-500">© {new Date().getFullYear()} {APP_NAME}. Confidential — authorised users only.</div>
+        <div className="relative mt-12 text-xs text-slate-500">
+          © {new Date().getFullYear()} {APP_NAME}. Confidential — authorised users only.
+        </div>
       </div>
       <div className="flex items-center justify-center bg-background px-4 py-12 sm:px-8">
         <div className="w-full max-w-md animate-slide-up">{children}</div>

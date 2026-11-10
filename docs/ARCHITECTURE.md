@@ -1,146 +1,126 @@
-# DMS — Architecture
+# Architecture
 
-## 1. System overview
+## 1. Overview
 
 ```
-┌──────────────────────────┐        HTTPS (same origin)        ┌──────────────────────────────┐
-│  React SPA (client/)     │  ───────────────────────────────▶ │  Express REST API (server/)  │
-│  Vite · TS · Tailwind    │   Bearer access JWT (memory)      │  /api/*                      │
-│  shadcn-style UI         │   httpOnly refresh cookie         │  helmet · rate limit · zod   │
-│  TanStack Query · RHF+Zod│                                   │  RBAC + scope checks         │
-└──────────────────────────┘                                   └──────┬───────────────┬───────┘
-                                                                      │               │
-                                                        SQL (pg)      │               │  AWS SDK v3
-                                                                      ▼               ▼
-                                                        ┌────────────────────┐ ┌──────────────────────┐
-                                                        │ PostgreSQL         │ │ S3 (private bucket)  │
-                                                        │ (PGlite in local   │ │ presigned GET/PUT,   │
-                                                        │  dev if no DB URL) │ │ 5-min expiry, SSE    │
-                                                        └────────────────────┘ └──────────────────────┘
+┌──────────────────────────┐   same origin (HTTPS)    ┌──────────────────────────────┐
+│ React app (client/)      │ ───────────────────────▶ │ Express API (server/)  /api/* │
+│ Home · Folder · File ·   │  Bearer token (memory)   │ helmet · rate limits · zod   │
+│ Search · Add files ·     │  httpOnly refresh cookie │ role checks on every write   │
+│ People · My account      │                          └──────┬────────────────┬──────┘
+└──────────────────────────┘                                 │ SQL (pg)       │ AWS SDK
+                                                             ▼                ▼
+                                              PostgreSQL (PGlite locally)   Private S3 bucket
+                                                                            (5-minute links)
 ```
 
-* **Single origin in production.** Express serves the built SPA (`client/dist`) and the API, so cookies are
-  `SameSite=Strict` and no CORS is needed. In development Vite proxies `/api` to the server.
-* **Storage drivers.** `STORAGE_DRIVER=s3` uses a private S3 bucket and returns presigned URLs.
-  `STORAGE_DRIVER=local` (development only) stores files outside the web root and serves them through
-  HMAC-signed, time-limited URLs that behave exactly like presigned URLs. No storage URL is ever
-  permanent or public.
-* **Database drivers.** `DATABASE_URL` set → `pg` connection pool against PostgreSQL. Unset (local dev
-  and tests) → PGlite, an embedded build of real PostgreSQL, so the same SQL and migrations run everywhere.
+- One origin in production: Express serves the built app and the API, so there is no CORS and
+  cookies are `SameSite=Strict`.
+- Storage: `STORAGE_DRIVER=s3` uses a private bucket with presigned links. `local` (development only)
+  keeps files outside the web root behind HMAC-signed links that expire. Admins can switch to S3 at
+  runtime from `/settings/storage`.
+- Database: `DATABASE_URL` points at PostgreSQL. Without it, PGlite (PostgreSQL compiled to WASM) runs
+  the same SQL and migrations, for development and tests.
 
-## 2. Roles and access model
+## 2. Roles
 
-| Role | Portal | Scope of data |
-|---|---|---|
-| **admin** | Admin & Staff portal | Everything, all clients |
-| **staff** (your internal employees) | Admin & Staff portal | Only clients assigned to them (`staff_client_assignments`), only what their permissions allow |
-| **employee** (client employees) | Employee portal | Only their own employee record, documents, folders, requests |
-
-Effective permissions = `role_permissions(role)` ∪ `user_permissions(user)`. Admin's role holds every
-permission. Staff's role holds only `documents.view`; everything else is granted per staff user, so staff
-never inherit admin power. Employees hold no permission keys — their capabilities are hard-scoped to
-"own records" in code.
-
-| Permission | Meaning |
+| Role | Can |
 |---|---|
-| `documents.view` | List / open documents in scope |
-| `documents.download` | Preview and download files (signed URLs) |
-| `documents.upload` | Upload or replace on behalf of employees |
-| `documents.edit` | Rename, edit metadata, move between folders |
-| `documents.review` | Approve / reject / require renewal |
-| `documents.archive` | Archive and unarchive |
-| `documents.delete` | Delete documents |
-| `documents.comment` | Add comments and internal notes |
-| `folders.manage` | Create, rename, move, delete folders |
-| `requests.manage` | Assign document requests (tasks) to employees |
-| `users.manage` | Create, invite, edit, deactivate users; assign permissions and clients |
-| `clients.manage` | Create and edit client companies |
-| `audit.view` | Read audit logs |
+| **employee** | Sign in, browse folders, search, view and download every library file, change their password |
+| **admin** | Everything above, plus add/rename/move/replace/delete files, create/rename/delete folders, restore deleted files, manage People |
 
-**Every** document/folder operation goes through `server/src/services/access.ts`:
-1. `scopeFilter(user)` produces the SQL predicate that limits rows to the caller's scope
-   (admin → none, staff → assigned clients, employee → own employee id). List queries always include it.
-2. `loadDocumentForUser(user, id)` loads a single row *through the scope predicate*; out-of-scope rows
-   return 404 (not 403) so IDs cannot be probed.
-3. `requirePermission(key)` middleware + per-action checks (e.g. employees may replace a document only
-   while it is pending / rejected / expired / renewal-required).
+- Reads (`GET /api/library/*`) need any signed-in account.
+- Every write needs `role = admin`, checked on the server (`requireRole('admin')`). Uploads check
+  the role *before* the request body is read.
+- There are only these two roles. Migration 005 turned old staff accounts into employees and
+  migration 006 removed the staff role and the old permission tables.
 
-## 3. Authentication
-
-* Passwords hashed with **bcrypt (cost 12)**. Policy: ≥ 10 chars, upper, lower, digit.
-* Login: `POST /api/auth/login` with `portal` (`admin` | `employee`). Role must match the portal.
-  5 failed attempts lock the account for 15 minutes; login endpoint is rate limited per IP.
-* **Access token**: JWT (HS256, 15 min) held in memory by the SPA, sent as `Authorization: Bearer`.
-  Every request reloads the user, so deactivation takes effect immediately.
-* **Refresh token**: 256-bit random, stored **hashed** in `auth_sessions`, sent as an `httpOnly`,
-  `Secure`, `SameSite=Strict` cookie scoped to `/api/auth`. Rotated on every refresh; reuse of an old
-  token revokes the whole session family (theft detection). Refresh requires the `X-Requested-With`
-  header as an extra CSRF guard.
-* Invitations and password resets use single-use, hashed, expiring tokens (`user_tokens`).
-
-## 4. Document lifecycle
+## 3. Library data model
 
 ```
-upload ──▶ pending_review ──approve──▶ approved ──(≤30 days to expiry)──▶ renewal_required
-                │                         │                                     │
-                └──reject──▶ rejected     └──────────(expiry date passed)───────┴──▶ expired
-                                 │                                                       │
-                                 └──────────── upload new version ◀──────────────────────┘
-                                                     (back to pending_review, old version kept)
+library_folders (id, name, parent_id → library_folders, depth 1..3)
+library_files   (id, folder_id → library_folders, name, valid_until, current_version_id,
+                 deleted_at, purged_at)                 unique (folder_id, lower(name)) for live files
+library_file_versions (id, file_id, version_number, storage_key, original_filename, file_ext,
+                       mime_type, size_bytes, checksum_sha256)
 ```
 
-* Each upload creates a row in `document_versions`; `documents.current_version_id` points to the latest.
-  Old versions remain downloadable by authorized users.
-* An hourly **expiry job** marks expired documents, flips approved documents to `renewal_required` at
-  30 days, and sends 90/60/30-day and expired notifications (de-duplicated via `expiry_reminders`).
-* Files are validated server-side by extension whitelist, declared MIME, **magic bytes**, and size.
-  Storage keys are generated (`clients/<id>/documents/<id>/v<n>-<uuid>.<ext>`) and never contain
-  user-supplied names.
+- **Depth** is stored and limited to 3 (`CHECK depth BETWEEN 1 AND 3`), so breadcrumbs and counts
+  need no recursive queries: a file's path is at most three joins away.
+- **Replace** adds a version and moves `current_version_id`; earlier copies stay stored.
+- **Delete** sets `deleted_at`. The file appears under Recently deleted and can be restored for
+  30 days. A background job then deletes the stored copies and sets `purged_at`.
+- A folder can only be deleted when it has no live files and no sub-folders.
+- **Search** requires every word to match (case-insensitive, partial) the file name, the original
+  file name or any of its folder names, accepting simple spelling variants. These are kept together in
+  one `search_text` column per file, with a trigram index, so search stays fast with hundreds of
+  thousands of files. Database triggers refresh it when a file or folder is renamed or moved.
+- Storage keys are generated (`library/<file id>/<uuid>.<ext>`) and never include user input.
+  Downloads are named after the document.
+- Uploads are checked by extension allow-list, declared type, **file signature (magic bytes)** and
+  size (25 MB).
 
-## 5. Folder model
+### Built for large libraries (migration 007)
 
-```
-Client root (client_root, created with the client)
-├── Employee folder (employee_root, created with the employee)
-│   ├── Identification Documents   (category folders, auto-created on first upload)
-│   ├── Educational Certificates
-│   └── ...custom subfolders
-└── ...custom folders
-```
+Tested with 10,000 folders and 100,000 files:
 
-System folders (client/employee roots) cannot be deleted or renamed. Deleting a non-empty folder
-requires an explicit choice to move its contents to the parent folder. Folder moves are cycle-checked
-and cannot cross clients.
+- **Counts are stored, not counted.** Each folder keeps `own_files` and `total_files` (including
+  sub-folders), maintained by triggers on every add, move, delete, restore and folder move.
+- **Lists are paged.** Folder and search results arrive 50 at a time as you scroll. Only the first page
+  works out the total, capped at "10,000+".
+- **The folder sidebar** (a drawer on phones) is a tree that loads each level only when it is opened,
+  and opens itself to the current folder.
+- **Pickers load one level at a time** and can find any folder by name, so no screen ever downloads
+  the whole tree.
+- Indexes cover every sort and filter: per-folder by date, expiry date, recently deleted, and folder
+  names by parent.
 
-## 6. Database
+Migration 005 copied the earlier version's live documents into the library; migration 006 then removed
+the old tables (`documents`, `document_versions`, `folders`, `clients`, `employees`, …). The activity
+log keeps its full history. Stored files of old deleted or archived documents are never deleted
+automatically: their locations are saved in `app_settings` under `retired_files`.
 
-See `server/src/db/migrations/001_init.sql` — normalized schema with foreign keys, check constraints,
-indexes (including trigram indexes for partial-name search) and an append-only trigger on `audit_logs`.
+## 4. Sign-in and sessions
 
-Tables: `roles`, `permissions`, `role_permissions`, `user_permissions`, `users`, `clients`, `employees`,
-`staff_client_assignments`, `auth_sessions`, `user_tokens`, `document_categories`, `folders`,
-`documents`, `document_versions`, `document_approvals`, `document_comments`, `document_requests`,
-`notifications`, `expiry_reminders`, `audit_logs`, `schema_migrations`.
+- One sign-in page. Passwords use bcrypt (cost 12), 10–72 characters with upper, lower and digit.
+- Every failure gets the same message. Failed attempts are counted atomically; 5 lock the account
+  for 15 minutes; the endpoint is rate-limited per IP.
+- **Access token:** HS256 JWT (15 minutes) kept in memory, bound to a live session of the same user.
+  Every request reloads the user, so removing access takes effect immediately.
+- **Refresh token:** random, stored hashed, httpOnly / Secure / SameSite=Strict cookie on
+  `/api/auth`. It rotates on every use. Replaying an old token revokes the whole session (theft
+  detection), and a sign-in lasts at most 30 days.
+- **Two-step sign-in (TOTP):** admins only, required in production. Secrets are AES-256-GCM
+  encrypted; codes work once (replay protection); 10 hashed recovery codes.
+- Invitations and password resets are single-use, hashed, expiring tokens.
 
-## 7. Frontend structure
+## 5. Activity record and other protections
+
+- Every view, download, change and sign-in is written to `audit_logs`. A database trigger blocks
+  UPDATE, DELETE and TRUNCATE. There's no screen for it; admins and IT can export it via
+  `GET /api/audit-logs`.
+- Download links last 5 minutes, and each person can request 200 per hour. Hitting the limit is
+  recorded.
+- Helmet sets a strict CSP (previews allowed only from the active bucket), HSTS in production,
+  `nosniff` and frame restrictions.
+- Request IDs appear in logs and error responses; logs never contain invitation or file tokens.
+- In production the server refuses example secrets, local storage, http addresses or a missing
+  encryption key.
+
+## 6. Client structure
 
 ```
 client/src
-├── api/          axios client (token refresh), typed endpoint functions
-├── components/
-│   ├── ui/       shadcn-style primitives (Radix + Tailwind)
-│   ├── layout/   AppShell, Sidebar, Topbar, NotificationBell
-│   └── documents/ DocumentTable, Filters, UploadDropzone, PreviewDialog, StatusBadge ...
-├── hooks/        TanStack Query hooks per resource
-├── lib/          utils, formatters, auth context
-└── pages/        route screens (dashboard, documents, explorer, reviews, expiry, users, ...)
+├── api/                 axios client (silent refresh) + TanStack Query hooks
+├── components/library/  folder tiles and rows, document browser (filters, paging, bulk select), quick search, folder picker, breadcrumb,
+│                        folder picker, admin dialogs (rename, move, replace, delete, folders)
+├── components/security/ two-step sign-in setup
+├── components/users/    shareable invitation message
+├── components/ui/       buttons, inputs, dialogs, menus
+└── pages/               Home, Folder, File, Search, Add files, People, Recently deleted,
+                         My account, Sign in, Accept invitation, Storage (IT)
 ```
 
-## 8. Deployment (AWS)
-
-* **App**: container (see `Dockerfile`) on ECS Fargate or Elastic Beanstalk behind an ALB with TLS.
-* **DB**: RDS for PostgreSQL (encryption at rest, automated backups), `DATABASE_URL` from Secrets Manager.
-* **Files**: private S3 bucket — Block Public Access ON, SSE-S3 or SSE-KMS, bucket policy denying
-  non-TLS access. The app's IAM role needs only `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` on
-  `arn:aws:s3:::<bucket>/clients/*`.
-* `JWT_SECRET`, `FILE_URL_SECRET` from Secrets Manager; `NODE_ENV=production`, `TRUST_PROXY=1`.
+Accessibility: base text 16–18px, 44px minimum touch targets, AA contrast, visible focus, skip link,
+labelled landmarks ("You are here" breadcrumb), and screen-reader names that include the file
+("Download Fire Safety Licence 2025, PDF, 1.2 MB"). Status is never shown by colour alone.

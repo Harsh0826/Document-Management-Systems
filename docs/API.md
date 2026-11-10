@@ -1,130 +1,96 @@
-# DMS REST API
+# API
 
-Base URL: `/api`. All bodies are JSON unless noted. Authenticated endpoints need
-`Authorization: Bearer <accessToken>`. Errors always look like:
+Base URL `/api`. JSON unless noted. Signed-in calls send `Authorization: Bearer <accessToken>`.
+Errors look like:
 
 ```json
-{ "error": { "code": "bad_request", "message": "Validation failed", "details": { "fields": { "email": "Invalid email address" } } } }
+{ "error": { "code": "name_taken", "message": "There's already a file called \"Holiday Policy\" in this folder. Choose another name.", "details": { "fields": { "name": "…" } } } }
 ```
 
-| Status | Meaning |
-|---|---|
-| 400 | Validation failed (`details.fields` maps field → message) |
-| 401 | Not signed in / token expired / session revoked |
-| 403 | Signed in but not permitted |
-| 404 | Not found **or outside your scope** (ids of other clients' data are never confirmed) |
-| 409 | Conflict (duplicate, non-empty folder, …) |
-| 413 / 415 | File too large / file type not allowed or content does not match extension |
-| 429 | Rate limited |
+Messages are written in plain language so the app can show them as they are.
 
-Scope rules: **admin** → all data · **staff** → assigned clients only, plus granted permissions ·
-**employee** → own records only. The `can` object returned with documents lists the actions the
-caller may perform; the server enforces each one regardless.
+Two roles: **employee** (view and download everything in the library) and **admin** (also manages
+files, folders and people). Every write endpoint checks the role on the server.
 
----
+## Sign-in — `/api/auth`
 
-## Auth — `/api/auth`
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| POST | `/login` | – | `{ email, password, portal: "admin" \| "employee" }` → `{ accessToken, user }`, sets httpOnly refresh cookie. Role must match portal (admin portal: admin + staff). 5 failures → 15-min lock. |
-| POST | `/refresh` | cookie + `X-Requested-With: XMLHttpRequest` | Rotates the refresh token → `{ accessToken, user }`. Replaying an old token revokes the session family. |
-| POST | `/logout` | cookie + `X-Requested-With` | Revokes the session family, clears cookie. `204` |
-| GET | `/invitations/:token` | – | Validates an invite → `{ email, firstName, lastName, portal }` or `410` |
-| POST | `/accept-invite` | – | `{ token, password }` → sets password, activates account → `{ portal }` |
-| GET | `/me` | ✓ | Current user + profile details |
-| PATCH | `/profile` | ✓ | `{ firstName, lastName, phone?, jobTitle? }` |
-| POST | `/change-password` | ✓ | `{ currentPassword, newPassword }`; signs out other devices |
-
-Password policy: ≥10 chars, upper, lower, digit.
-
-## Dashboard — `/api/dashboard`
-
-| GET | `/` | ✓ | Scoped totals (employees, documents, pending, approved, rejected, expired, renewalRequired, expiring30/60/90, openRequests, overdueRequests), `uploadsByMonth` (6 months), `byCategory`, `recentUploads`, `pendingApprovals`, `expiringSoon`, `recentActivity` |
-|---|---|---|---|
-
-## Documents — `/api/documents`
-
-| Method | Path | Permission | Description |
-|---|---|---|---|
-| GET | `/` | `documents.view` (staff) / own (employee) | Search & filter. Query: `q` (title, current or past file name, employee name/number, category, description — partial, case-insensitive), `clientId`, `employeeId`, `categoryId` (csv), `fileType` (csv: pdf,doc,docx,jpg,jpeg,png,xls,xlsx), `status` (csv), `uploadedBy`, `uploadedFrom`, `uploadedTo`, `expiryFrom`, `expiryTo`, `expiringWithin` (days), `folderId`, `includeSubfolders=true`, `archived=exclude\|only\|include`, `sort=title\|employee\|category\|fileType\|uploadedAt\|expiryDate\|status\|client`, `order`, `page`, `pageSize` (≤100) → `{ items, total, page, pageSize }` |
-| POST | `/` | employee (self) or `documents.upload` | **multipart/form-data**: `file` + `title`, `description?`, `categoryId?`, `employeeId` (staff/admin), `folderId?`, `requestId?`, `issueDate?`, `expiryDate?`. Max 25 MB. Validated by extension, MIME and magic bytes. Files into the category folder automatically and fulfils a matching open request. `201` |
-| GET | `/:id` | view | Details + `versions`, `approvals`, `comments` (internal notes hidden from employees), `folderPath`, `can`. Audited as `document.viewed`. |
-| PATCH | `/:id` | `documents.edit` (title/description/category), dates need `edit_dates`, `folderId` needs move | Employees may edit title/description/category; dates only while pending/rejected. |
-| POST | `/:id/versions` | `documents.upload`, or employee while pending/rejected/expired/renewal-required | multipart `file` + `issueDate?`, `expiryDate?`, `changeNote?`. Keeps previous versions; status → `pending_review`. |
-| POST | `/:id/review` | `documents.review` | `{ decision: "approved" \| "rejected" \| "renewal_required", comment? }` (comment required unless approving). Cannot approve an already-expired certificate. Notifies the employee. |
-| POST | `/:id/archive` · `/:id/unarchive` | `documents.archive` | |
-| DELETE | `/:id` | `documents.delete` | Soft-deletes the record (kept for audit) and purges all stored files. `204` |
-| POST | `/move` | `documents.edit` | `{ documentIds: [], folderId }` — same client only; personal folders only accept that employee's documents. |
-| GET | `/:id/url` | `documents.download` | `?disposition=inline\|attachment&versionId=` → `{ url, expiresAt, filename, mimeType, previewable }`. Short-lived signed URL (S3 presigned, or HMAC-signed local URL). Inline only for PDF/images. Audited. |
-| POST | `/:id/comments` | `documents.comment` / employee | `{ body, isInternal? }` — internal notes are staff/admin only. |
-| GET | `/:id/history` | staff/admin | Audit trail of the document. |
-
-Statuses: `pending_review`, `approved`, `rejected`, `expired`, `renewal_required`.
-
-## Files — `/api/files/:token` (local storage driver only)
-
-Streams a file for a valid, unexpired HMAC token (`403` otherwise). With S3, URLs point directly to the private bucket.
-
-## Folders — `/api/folders`
-
-| Method | Path | Permission | Description |
-|---|---|---|---|
-| GET | `/` | view | All visible folders (flat, with `documentCount`, `childCount`, `kind`). `?clientId=` |
-| GET | `/:id` | view | Folder + breadcrumb `path` + `children` |
-| POST | `/` | `folders.manage` | `{ name, parentId }` — inherits client/employee from parent |
-| PATCH | `/:id` | `folders.manage` | `{ name?, parentId? }` — system folders immutable; moves are cycle-checked, same client and same employee subtree |
-| DELETE | `/:id` | `folders.manage` | `409` with counts if not empty, unless `?moveContentsToParent=true` |
-
-Folder kinds: `client_root`, `employee_root` (system, auto-created), `category` (auto-created on upload), `custom`.
-
-## Requests (tasks) — `/api/requests`
-
-| GET | `/` | view | `?status=open\|fulfilled\|cancelled&employeeId&clientId&page` |
-|---|---|---|---|
-| POST | `/` | `requests.manage` | `{ employeeIds: [], title, categoryId?, instructions?, dueDate? }` → notifies each employee |
-| POST | `/:id/cancel` | `requests.manage` | |
-
-## Notifications — `/api/notifications`
-
-| GET | `/` | ✓ | `?unreadOnly=true&page` → `{ items, total, unread }` |
-|---|---|---|---|
-| GET | `/unread-count` | ✓ | |
-| POST | `/:id/read` · `/read-all` | ✓ | |
-
-Types: `document_uploaded`, `document_approved`, `document_rejected`, `renewal_required`,
-`certificate_expiring`, `certificate_expired`, `document_requested`, `comment_added`, `account`.
-
-## Users — `/api/users` (requires `users.manage`)
-
-| Method | Path | Description |
+| Method | Path | Notes |
 |---|---|---|
-| GET | `/` | `?q&role&status&clientId&page` |
-| GET | `/permissions` | Permission catalogue with `grantableToStaff` |
-| GET | `/:id` | Detail incl. granted permissions and assigned clients |
-| POST | `/` | Create: `{ email, firstName, lastName, role, … }`. Employees need `clientId` (+ `employeeNumber`, `department`, `position`, `hireDate`). Staff accept `permissions[]`, `clientIds[]`. Without `password` the user is `invited` and the response has a single-use `inviteUrl`. |
-| PATCH | `/:id` | Profile fields; role admin⇄staff |
-| PUT | `/:id/permissions` | Staff only: `{ permissions: [] }` (users/clients management cannot be granted to staff) |
-| PUT | `/:id/clients` | Staff only: `{ clientIds: [] }` |
-| POST | `/:id/deactivate` · `/:id/activate` | Deactivation revokes all sessions immediately; the last active admin cannot be deactivated |
-| POST | `/:id/invite` | New invitation link for an invited user |
+| POST | `/login` | `{ email, password }` → `{ accessToken, user }` (sets an httpOnly refresh cookie), or `{ mfaRequired: true, mfaToken }` for admins with two-step sign-in. One generic message for every failure; 5 failures lock the account for 15 minutes. |
+| POST | `/login/mfa` | `{ mfaToken, code }`. `code` is the 6-digit code or a recovery code. |
+| POST | `/refresh` | Needs the cookie and `X-Requested-With: XMLHttpRequest`. Rotates the cookie; `409 refresh_race` means "retry once". |
+| POST | `/logout` | Ends the session. |
+| GET | `/invitations/:token` | Checks an invitation or reset link → `{ email, firstName, purpose }`. |
+| POST | `/accept-invite` | `{ token, password }`. Sets the password (10–72 chars, upper, lower, digit). |
+| GET | `/me` | The signed-in person. |
+| POST | `/change-password` | `{ currentPassword, newPassword }`. Signs out other devices. |
+| GET/POST | `/mfa`, `/mfa/setup`, `/mfa/enable`, `/mfa/recovery-codes`, `/mfa/disable` | Two-step sign-in (required for admins in production). |
 
-## Clients, employees, categories
+## Library — `/api/library`
 
-| GET | `/api/clients` | ✓ (scoped) | with employee/document/pending/staff counts |
-|---|---|---|---|
-| POST / PATCH | `/api/clients[/:id]` | `clients.manage` | `{ name, code, industry?, contactEmail?, isActive? }`; creates the client root folder |
-| GET | `/api/employees` | ✓ (scoped) | `?q&clientId&page&pageSize` with document/pending/expired/request counts |
-| GET | `/api/employees/:id` | ✓ (scoped) | |
-| GET | `/api/categories` | ✓ | |
-| POST / PATCH / DELETE | `/api/categories[/:id]` | `clients.manage` | delete refused while in use |
+### Reading (everyone)
 
-## Audit — `/api/audit-logs` (requires `audit.view`; staff limited to assigned clients)
-
-| GET | `/` | `?q&action&entityType&entityId&actorId&clientId&from&to&page&pageSize` |
+| Method | Path | Returns |
 |---|---|---|
-| GET | `/actions` | Distinct action names |
+| GET | `/home` | `{ folders, pinned, recent, opened, totals, attention? }`: top-level folders, the person's pinned folders, the 6 newest files, the 6 files the person opened most recently, `{ files, folders }` totals and, for admins, `{ expired, soon }` counts. Folders carry `fileCount` (including sub-folders), `folderCount` and `parents` (where the folder lives). |
+| GET | `/folders?parent=` | One level of folders (top level without `parent`), up to 2,000. Pickers load the library one level at a time. |
+| GET | `/folders?q=` | Up to 30 folders anywhere whose name matches, best matches first, with `parents`. |
+| GET | `/folders/:id` | The folder, its `path` (breadcrumb), `subfolders`, `ownFileCount` (files directly in it) and `pinned`. Files come from `GET /files`. |
+| GET | `/files?folder=&deep=&q=&type=&validity=&added=&sort=&offset=&limit=` | Documents a page at a time (`limit` up to 100, default 50): `{ files, nextOffset, total?, totalIsCapped? }`. `folder` limits it to one folder; `deep=1` includes its sub-folders. `type` is `pdf`, `word`, `excel` or `picture`; `validity` is `expired`, `soon` (within 30 days), `valid` or `none`; `added` is `7`, `30` or `365` days. `sort` is `relevance` (the default with `q`), `newest` (the default otherwise), `oldest`, `name`, `name_desc`, `expiry` or `largest`. Only the first page has `total`, capped at 10,000 (`totalIsCapped`). |
+| GET | `/search?q=&limit=` | Quick suggestions while typing: `{ folders, files, moreFiles }`, at most 8 folders and `limit` (default 8) files. Every word must match the file name, original file name or a folder name. Partial words and spelling variants count (licence/license, policy/policies). |
+| GET | `/expiry` | `{ expired, soon }`: how many documents have expired and how many expire in the next 30 days (the counts in the navigation bar). |
+| GET | `/pins` | `{ folders }`: your pinned folders (the sidebar). |
+| PUT / DELETE | `/folders/:id/pin` | Pin or unpin a folder on your own Home page (up to 50). Nobody else sees your pins. |
+| GET | `/files/:id` | One file. |
+| GET | `/files/:id/url?disposition=inline\|attachment` | A link that expires in 5 minutes, used for viewing in the app or downloading. Downloads are named after the document. Limited to 200 per person per hour, and recorded. |
 
-## Health
+A file looks like this:
 
-`GET /api/health` → `{ ok: true, storage }`
+```json
+{
+  "id": "…", "name": "Fire Safety Licence 2025", "folderId": "…",
+  "folderPath": [{ "id": "…", "name": "Licences" }, { "id": "…", "name": "2025" }],
+  "validUntil": "2026-03-02", "daysLeft": 117, "addedAt": "2025-03-03T09:12:00Z", "isNew": false,
+  "type": "PDF", "ext": "pdf", "sizeBytes": 1258291, "previewable": true
+}
+```
+
+### Managing (admins)
+
+| Method | Path | Body / notes |
+|---|---|---|
+| POST | `/folders` | `{ name, parentId? }`. Folders can only go 3 levels deep, and two folders in the same place can't share a name. |
+| PATCH | `/folders/:id` | `{ name?, parentId? }`: rename and/or move a folder with everything in it (`parentId: null` moves it to the top level). It refuses to move a folder into itself or deeper than 3 levels. |
+| POST | `/files/bulk` | `{ action: "move" | "delete", ids (up to 500), folderId? }` → `{ done, skipped, notFound }`. A move skips files whose name is already used in the destination and lists them in `skipped`. |
+| DELETE | `/folders/:id` | Only empty folders. Otherwise `409` "This folder still has 3 files. Move or delete them first." |
+| POST | `/files` | **multipart**: `file`, `folderId`, optional `name` (defaults to a tidy version of the file name) and `validUntil`. Accepts PDF, Word, Excel, JPG and PNG up to 25 MB, checking the real file content. Two files in one folder can't share a name. |
+| PATCH | `/files/:id` | `{ name?, folderId?, validUntil? }`: rename, move, or change the date. |
+| POST | `/files/:id/replace` | **multipart** `file`, optional `validUntil`. Keeps the name and place; the old copy is kept. |
+| DELETE | `/files/:id` | Moves the file to Recently deleted. |
+| GET | `/deleted` | Recently deleted files, each with `removedForGoodAt`. |
+| POST | `/files/:id/restore` | Brings a deleted file back (within 30 days). |
+
+After 30 days, a background job removes deleted files' stored copies for good.
+
+## People — `/api/people` (admins)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/` | `{ id, firstName, lastName, email, isAdmin, status, twoStepOn, lastLoginAt }[]` |
+| POST | `/` | `{ firstName, lastName, email, isAdmin }` → `{ person, inviteUrl, expiresInHours }` |
+| PATCH | `/:id` | `{ isAdmin }`: "Can manage documents?" |
+| POST | `/:id/reset-password` | → `{ url, hours, kind }`. Sends a new invitation instead if they haven't accepted the first one. Signs them out. |
+| POST | `/:id/remove` | Removes access straight away. |
+| POST | `/:id/restore` | Gives access again. |
+| POST | `/:id/reset-two-step` | For a lost phone. |
+
+There is always at least one admin, and admins can't remove or demote themselves.
+
+## For IT
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/audit-logs` | Admin-only export of the activity record (sign-ins, views, downloads, changes). No screen in the app. |
+| GET/PUT/POST | `/api/admin/storage`, `/s3`, `/test`, `/move` | One-time S3 setup (screen at `/settings/storage`, not in the menu). See `docs/S3_MIGRATION.md`. |
+| GET | `/api/files/:token` | Serves files for the local development storage only. |
+| GET | `/api/health` | `{ ok: true }` |

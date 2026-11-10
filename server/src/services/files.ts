@@ -56,8 +56,11 @@ function magicMatches(ext: FileExt, buf: Buffer): boolean {
 
 /** Strips directories and control characters from a client-supplied filename. */
 export function sanitizeFilename(name: string): string {
-  // eslint-disable-next-line no-control-regex
-  const clean = basename(name.replace(/\\/g, '/')).replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_').trim();
+  // Replace control characters (U+0000–U+001F, U+007F) and characters unsafe in file names.
+  const clean = [...basename(name.replace(/\\/g, '/'))]
+    .map((ch) => (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f || '<>:"|?*'.includes(ch) ? '_' : ch))
+    .join('')
+    .trim();
   return (clean || 'file').slice(0, 200);
 }
 

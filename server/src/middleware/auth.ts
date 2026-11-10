@@ -1,9 +1,9 @@
 import type { NextFunction, Request, Response } from 'express';
-import { forbidden, unauthorized } from '../lib/errors.js';
+import { AppError, forbidden, unauthorized } from '../lib/errors.js';
 import { isSessionActive, loadAuthUser, verifyAccessToken } from '../services/auth.js';
-import type { PermissionKey, RoleName } from '../types.js';
+import type { RoleName } from '../types.js';
 
-/** Verifies the bearer JWT, then reloads the user so deactivation/permission changes apply instantly. */
+/** Verifies the bearer JWT, then reloads the user so deactivation and role changes apply instantly. */
 export async function authenticate(req: Request, _res: Response, next: NextFunction) {
   const header = req.get('authorization');
   if (!header?.startsWith('Bearer ')) throw unauthorized();
@@ -13,9 +13,13 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   } catch {
     throw unauthorized('Session expired or invalid');
   }
-  if (!(await isSessionActive(claims.sid))) throw unauthorized('Session has been revoked');
+  if (!(await isSessionActive(claims.sid, claims.sub))) throw unauthorized('Session has been revoked');
   const user = await loadAuthUser(claims.sub);
   if (!user || user.status !== 'active') throw unauthorized('Account is not active');
+  // Users whose role requires MFA must finish enrolling before touching any data.
+  if (user.mfaSetupRequired && !req.originalUrl.startsWith('/api/auth/')) {
+    throw new AppError(403, 'Set up two-factor authentication to continue', 'mfa_setup_required');
+  }
   req.user = user;
   req.sessionId = claims.sid;
   next();
@@ -28,17 +32,6 @@ export const requireRole =
     if (!roles.includes(req.user.role)) throw forbidden();
     next();
   };
-
-/** Requires every listed permission. */
-export const requirePermission =
-  (...perms: PermissionKey[]) =>
-  (req: Request, _res: Response, next: NextFunction) => {
-    if (!req.user) throw unauthorized();
-    if (!perms.every((p) => req.user!.permissions.has(p))) throw forbidden();
-    next();
-  };
-
-export const can = (req: Request, perm: PermissionKey) => !!req.user?.permissions.has(perm);
 
 /** Narrowing helper for handlers that run after `authenticate`. */
 export function currentUser(req: Request) {

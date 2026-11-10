@@ -1,5 +1,5 @@
-import { Checkbox as CheckboxPrimitive, Label as LabelPrimitive, Switch as SwitchPrimitive } from 'radix-ui';
-import { Check, ChevronDown } from 'lucide-react';
+import { Label as LabelPrimitive } from 'radix-ui';
+import { ChevronDown } from 'lucide-react';
 import { forwardRef, type ComponentProps, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { cn } from '@/lib/utils';
 
@@ -31,7 +31,23 @@ export function Label({ className, ...props }: ComponentProps<typeof LabelPrimit
   return <LabelPrimitive.Root className={cn('text-sm font-medium leading-none text-foreground select-none', className)} {...props} />;
 }
 
-export function Field({ label, error, hint, required, children, className, htmlFor }: { label?: ReactNode; error?: string; hint?: ReactNode; required?: boolean; children: ReactNode; className?: string; htmlFor?: string }) {
+export function Field({
+  label,
+  error,
+  hint,
+  required,
+  children,
+  className,
+  htmlFor,
+}: {
+  label?: ReactNode;
+  error?: string;
+  hint?: ReactNode;
+  required?: boolean;
+  children: ReactNode;
+  className?: string;
+  htmlFor?: string;
+}) {
   return (
     <div className={cn('space-y-1.5', className)}>
       {label && (
@@ -41,34 +57,13 @@ export function Field({ label, error, hint, required, children, className, htmlF
         </Label>
       )}
       {children}
-      {error ? <p className="text-xs font-medium text-destructive" role="alert">{error}</p> : hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
+      {error ? (
+        <p className="text-xs font-medium text-destructive" role="alert">
+          {error}
+        </p>
+      ) : hint ? (
+        <p className="text-xs text-muted-foreground">{hint}</p>
+      ) : null}
     </div>
-  );
-}
-
-export function Checkbox({ className, ...props }: ComponentProps<typeof CheckboxPrimitive.Root>) {
-  return (
-    <CheckboxPrimitive.Root
-      className={cn(
-        'peer size-4 shrink-0 cursor-pointer rounded-[4px] border border-slate-300 bg-card shadow-xs transition-colors data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-white data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-white disabled:opacity-50',
-        className,
-      )}
-      {...props}
-    >
-      <CheckboxPrimitive.Indicator className="flex items-center justify-center">
-        {props.checked === 'indeterminate' ? <span className="h-0.5 w-2 rounded bg-white" /> : <Check className="size-3" strokeWidth={3} />}
-      </CheckboxPrimitive.Indicator>
-    </CheckboxPrimitive.Root>
-  );
-}
-
-export function Switch({ className, ...props }: ComponentProps<typeof SwitchPrimitive.Root>) {
-  return (
-    <SwitchPrimitive.Root
-      className={cn('inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent bg-slate-300 transition-colors data-[state=checked]:bg-primary disabled:opacity-50', className)}
-      {...props}
-    >
-      <SwitchPrimitive.Thumb className="block size-4 rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-4" />
-    </SwitchPrimitive.Root>
   );
 }

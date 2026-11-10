@@ -1,35 +1,33 @@
-# DocuVault — Secure Document Management System
+# Company Documents
 
-A full-stack platform for managing employee documents and certificates across client companies:
-client employees upload certificates, internal staff review them, administrators control users,
-permissions, folders and compliance.
+A simple internal library for company documents and licences. **Employees find, view and download.
+Administrators upload and organise.** Nothing else, so anyone can use it without training.
 
-**Stack:** React 19 · TypeScript · Tailwind CSS 4 · shadcn-style components (Radix) · TanStack Query ·
-React Hook Form + Zod · Node.js · Express 5 · PostgreSQL · AWS S3 · JWT + bcrypt.
+**Stack:** React 19 · TypeScript · Tailwind CSS 4 · Radix · TanStack Query · Node.js · Express 5 ·
+PostgreSQL · AWS S3 · JWT + bcrypt.
 
-- Architecture, roles, permission model, lifecycle: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- REST API reference: [`docs/API.md`](docs/API.md)
-- Database schema: [`server/src/db/migrations/001_init.sql`](server/src/db/migrations/001_init.sql)
+- Design and the reasoning behind every kept or removed feature: [`docs/REDESIGN_SPEC.md`](docs/REDESIGN_SPEC.md)
+- API: [`docs/API.md`](docs/API.md)
+- How it's built and secured: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Moving files to Amazon S3: [`docs/S3_MIGRATION.md`](docs/S3_MIGRATION.md)
 
-## Features
+## What people can do
 
-| Area | What works |
+| Everyone | Administrators also |
 |---|---|
-| Auth | Separate **Employee** and **Admin & Staff** portals, invitation links, bcrypt, 15-min JWT + rotating httpOnly refresh cookie with reuse detection, account lockout, rate limiting, instant revocation on deactivation |
-| RBAC | Admin (everything) · Staff (assigned clients + configurable permissions) · Employee (own records only). Enforced server-side on every query and action; out-of-scope ids return 404 |
-| Documents | Drag-and-drop multi-upload with per-file progress, type/size/magic-byte validation, metadata (title, description, category, employee, issue/expiry), versioning (replace/renew keeps history), rename, archive, delete, in-app PDF/image preview, signed-URL downloads |
-| Search & filters | Instant partial search over title, file names (incl. past versions), employee name/number, category; combinable filters for client, employee, category, file type, status, uploader, upload date, expiry date, expiring-within, archived; sorting; URL-shareable |
-| Folders | Client → Employee → Category hierarchy auto-created; custom subfolders; rename, move, safe delete (contents moved up), breadcrumbs, drag-and-drop filing |
-| Review | Review queue, approve / reject / require renewal with reasons, review history, comments and internal staff notes |
-| Expiry | Hourly job: marks expired, flags renewal at 30 days, sends 90/60/30-day and expiry notifications (once each); expiry tracker page |
-| Requests | Staff/admin request missing documents from one or many employees with due dates; auto-fulfilled by matching uploads |
-| Notifications | In-app bell + page for uploads, approvals, rejections, renewals, expiry, requests, comments |
-| Audit | Append-only audit log (DB trigger) of logins, failed logins, views, previews, downloads and every change |
-| Dashboard | Live, scoped stats, uploads chart, status breakdown, pending approvals, expiring soon, recent activity — no hardcoded data |
+| Sign in on one page | Add files (drag and drop, names filled in automatically) |
+| Search ("Search for a document…"), partial words and spelling variants included | Create, rename and delete folders (max 3 levels) |
+| Browse big, labelled folders with file counts and breadcrumbs (Home › Licences › 2025) | Rename, move, replace with a newer copy, delete files |
+| See Recently added on Home | Restore deleted files for 30 days |
+| **View** and **Download** every file, with name, date added, type, size and "Valid until" for licences | People: add, "Can manage documents?", reset password, remove access |
+| Change my password | Two-step sign-in (required for admins in production) |
 
-## Quick start (local)
+Kept in the background: private encrypted storage with 5-minute links, a record of every view,
+download and change, account lockout and rate limits.
 
-Requirements: Node.js 20+ (tested on 24). PostgreSQL and S3 are optional locally.
+## Run it locally
+
+Requirements: Node.js 20+. PostgreSQL and S3 are optional for local use.
 
 ```bash
 npm install
@@ -43,98 +41,47 @@ cp server/.env.example server/.env
 npm run dev
 ```
 
-Open http://localhost:5173. The API runs on :4000 and Vite proxies `/api`.
+Open http://localhost:5173. Without `DATABASE_URL` it uses an embedded PostgreSQL (`server/.data/`)
+and stores files on disk (`server/storage/`), for development only. On first start the default
+`.env` creates:
 
-Without `DATABASE_URL`, the server uses **PGlite** (real PostgreSQL compiled to WASM, data in
-`server/.data/`) and stores files on local disk behind HMAC-signed expiring URLs — handy for
-development only. With the default `.env`, these accounts are created on first start
-(no documents are seeded):
-
-| Portal | Email | Password |
+| Role | Email | Password |
 |---|---|---|
-| Admin & Staff | `admin@dms.local` | `Admin@12345` |
-| Admin & Staff | `staff@dms.local` (reviewer for the demo client) | `Demo@12345` |
+| Admin | `admin@dms.local` | `Admin@12345` |
 | Employee | `employee@dms.local` | `Demo@12345` |
 
-Change or remove these before any shared deployment (`SEED_DEMO_DATA=false`).
+…plus four empty starter folders (Licences, HR Policies, Finance, Health & Safety). Set
+`SEED_DEMO_DATA=false` and your own `SEED_ADMIN_*` values before sharing it with anyone.
 
-### Using real PostgreSQL + S3 locally (MinIO)
-
-```bash
-docker compose up -d
-```
-
-Then in `server/.env`:
-
-```
-DATABASE_URL=postgres://dms:dms_dev_password@localhost:5432/dms
-STORAGE_DRIVER=s3
-S3_BUCKET=dms-documents
-S3_ENDPOINT=http://localhost:9000
-S3_FORCE_PATH_STYLE=true
-AWS_ACCESS_KEY_ID=dms-minio
-AWS_SECRET_ACCESS_KEY=dms-minio-secret
-```
-
-## Tests
+## Checks
 
 ```bash
-npm test
+npm run ci
 ```
 
-27 integration tests (Vitest + Supertest against an in-memory PostgreSQL) cover login and portal
-enforcement, lockout, refresh-token rotation and reuse detection, CSRF guard, invitations,
-deactivation, cross-employee and cross-client isolation, permission-limited staff, upload validation
-(extension, spoofed content, required expiry), review workflow and notifications, signed-URL
-tampering, internal comments, search wildcards, folder safeguards, and the expiry job.
+That runs lint, formatting, typecheck, the 45 server tests and the build; GitHub Actions runs it on
+every push. The tests cover the library (3-level limit, duplicate names, search variants, counts,
+view/download links, recently deleted and the 30-day removal), read-only employees, People, sign-in,
+lockout, session theft detection, two-step sign-in, password resets, the append-only activity record
+and the S3 move.
 
-```bash
-npm run typecheck
-```
+## Deploying on AWS
 
-## Project structure
+1. **Database:** RDS PostgreSQL; set `DATABASE_URL` and `DATABASE_SSL=true`. Migrations run on start.
+2. **Files:** private S3 bucket (Block Public Access on, default encryption). The app's role needs
+   only `s3:PutObject`, `s3:GetObject` and `s3:DeleteObject` on the bucket.
+3. **Secrets:** `JWT_SECRET`, `FILE_URL_SECRET` (different, ≥48 random characters),
+   `DATA_ENCRYPTION_KEY` (32 random bytes, base64), `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`.
+4. **Run:** `docker build -t dms .` and deploy behind a load balancer with HTTPS. Set `NODE_ENV=production`,
+   `TRUST_PROXY=1` and `APP_URL=https://…`.
 
-```
-server/src
-  config/env.ts          zod-validated environment
-  db/                    pg / PGlite adapter, migrations, seed
-  middleware/            authentication, permission guards, rate limits, CSRF guard
-  services/              access (scope rules), auth, storage (S3/local), files (validation),
-                         folders, notifications, audit, expiry job
-  routes/                auth, users, clients/employees/categories, documents, folders,
-                         requests, notifications/audit/dashboard/files
-server/tests             integration tests
-client/src
-  api/                   axios client (silent refresh) + TanStack Query hooks
-  components/ui          button, inputs, dialogs, menus, tables, tabs… (shadcn-style)
-  components/documents   table, filters, actions, preview/review/edit/move/replace dialogs
-  components/folders     folder tree with drop targets
-  components/layout      app shell, sidebar, notifications
-  pages/                 dashboard, documents, detail, upload, folders, reviews, expiry,
-                         requests, employees, users, clients, categories, audit, profile, auth
-```
+The server refuses to start in production with missing or example secrets, local file storage, or an
+http address.
 
-## Production deployment (AWS)
+## Upgrading from the earlier version
 
-1. **Database:** RDS PostgreSQL 15+; set `DATABASE_URL` (and `DATABASE_SSL=true`). Migrations run
-   automatically on start (`npm run db:migrate` also available).
-2. **Storage:** private S3 bucket with Block Public Access on and default encryption (SSE-S3 or
-   KMS via `S3_KMS_KEY_ID`). Give the task role only `s3:PutObject`, `s3:GetObject`,
-   `s3:DeleteObject` on `arn:aws:s3:::<bucket>/clients/*`.
-3. **Secrets:** `JWT_SECRET` and `FILE_URL_SECRET` (≥32 random chars) and
-   `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` (≥14 chars, used once to create the first admin)
-   from Secrets Manager.
-4. **Run:** `docker build -t dms .` → ECS Fargate (or App Runner / Elastic Beanstalk) behind an
-   ALB with TLS. Set `NODE_ENV=production`, `TRUST_PROXY=1`, `APP_URL=https://your-domain`.
-   The container serves the SPA and the API from one origin (no CORS, `SameSite=Strict` cookies).
-
-The server refuses to start in production without `DATABASE_URL` and `STORAGE_DRIVER=s3`.
-
-## Not included yet
-
-- **Email delivery** — invitations return a single-use link the admin copies; notifications are
-  in-app. Plug SES into `services/notifications.ts` / user creation to email them.
-- **Self-service password reset** — admins issue new links; the `user_tokens` table already
-  supports a `password_reset` purpose.
-- **Virus scanning** of uploads (e.g. S3 + GuardDuty Malware Protection or ClamAV) and MFA are
-  recommended before handling highly sensitive identity documents.
+The previous version managed per-employee certificates for several client companies. Upgrading
+(migration `005_company_library.sql`) copies every live document into the shared library, with one
+top-level folder per old category. Former staff accounts become employees; promote them from People
+if they should manage documents. Migration `006_drop_old_app_tables.sql` then removes the old tables
+(the activity log is kept). Back up the database before upgrading.

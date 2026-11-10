@@ -7,7 +7,6 @@ export interface AuditEntry {
   action: string;
   entityType?: string;
   entityId?: string | null;
-  clientId?: string | null;
   metadata?: Record<string, unknown>;
   actorId?: string | null;
   actorEmail?: string | null;
@@ -20,7 +19,7 @@ export interface AuditEntry {
 export async function audit(req: Request | null, entry: AuditEntry, q: Queryable = db()) {
   try {
     await q.query(
-      `INSERT INTO audit_logs (actor_id, actor_email, action, entity_type, entity_id, client_id, ip, user_agent, metadata)
+      `INSERT INTO audit_logs (actor_id, actor_email, action, entity_type, entity_id, ip, user_agent, metadata, actor_name)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         entry.actorId !== undefined ? entry.actorId : (req?.user?.id ?? null),
@@ -28,10 +27,10 @@ export async function audit(req: Request | null, entry: AuditEntry, q: Queryable
         entry.action,
         entry.entityType ?? null,
         entry.entityId ?? null,
-        entry.clientId ?? null,
         req ? clientIp(req) : null,
         req ? userAgent(req) : null,
         JSON.stringify(entry.metadata ?? {}),
+        entry.actorId === undefined && req?.user ? `${req.user.firstName} ${req.user.lastName}` : null,
       ],
     );
   } catch (err) {

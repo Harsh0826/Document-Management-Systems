@@ -1,10 +1,10 @@
-import { Router, type CookieOptions, type Response } from 'express';
+import { Router, type CookieOptions, type Request, type Response } from 'express';
 import { z } from 'zod';
-import { isProd } from '../config/env.js';
-import { db } from '../db/index.js';
+import { isProd, mfaRequiredRoles } from '../config/env.js';
+import { db, type Queryable } from '../db/index.js';
 import { AppError, badRequest, unauthorized } from '../lib/errors.js';
 import { clientIp, userAgent } from '../lib/http.js';
-import { email, nonEmpty, parse, password, trimmed } from '../lib/validate.js';
+import { email, parse, password } from '../lib/validate.js';
 import { authenticate, currentUser } from '../middleware/auth.js';
 import { authLimiter, requireXhr } from '../middleware/security.js';
 import { audit } from '../services/audit.js';
@@ -14,12 +14,16 @@ import {
   findValidUserToken,
   hashPassword,
   loadAuthUser,
+  revokeAllSessions,
   revokeSessionByToken,
   rotateSession,
   serializeAuthUser,
   signAccessToken,
+  signMfaToken,
+  verifyMfaToken,
   verifyPassword,
 } from '../services/auth.js';
+import { clearMfa, confirmEnrollment, regenerateRecoveryCodes, remainingRecoveryCodes, startEnrollment, verifyUserMfa } from '../services/mfa.js';
 import type { RoleName } from '../types.js';
 
 export const authRouter = Router();
@@ -27,6 +31,24 @@ export const authRouter = Router();
 const COOKIE = 'dms_rt';
 const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
+
+const GENERIC_LOGIN_ERROR = `Invalid email or password. After ${MAX_FAILED} failed attempts sign-in is paused for ${LOCK_MINUTES} minutes.`;
+
+/**
+ * Atomically counts a failed attempt (safe under parallel requests — the row lock serialises the
+ * increments) and locks the account once the threshold is reached. Returns true when now locked.
+ */
+async function recordFailedAttempt(q: Queryable, userId: string): Promise<boolean> {
+  const { rows } = await q.query<{ locked: boolean }>(
+    `UPDATE users SET
+        locked_until = CASE WHEN failed_login_attempts + 1 >= $2 THEN now() + make_interval(mins => $3::int) ELSE locked_until END,
+        failed_login_attempts = CASE WHEN failed_login_attempts + 1 >= $2 THEN 0 ELSE failed_login_attempts + 1 END
+      WHERE id = $1
+      RETURNING locked_until IS NOT NULL AND locked_until > now() AS locked`,
+    [userId, MAX_FAILED, LOCK_MINUTES],
+  );
+  return rows[0]?.locked === true;
+}
 
 const cookieOpts = (expires?: Date): CookieOptions => ({
   httpOnly: true,
@@ -43,11 +65,10 @@ const clearRefreshCookie = (res: Response) => res.clearCookie(COOKIE, cookieOpts
 const loginSchema = z.object({
   email,
   password: z.string().min(1, 'Required').max(128),
-  portal: z.enum(['admin', 'employee']),
 });
 
 authRouter.post('/login', authLimiter, async (req, res) => {
-  const { email: mail, password: pwd, portal } = parse(loginSchema, req.body);
+  const { email: mail, password: pwd } = parse(loginSchema, req.body);
   const { rows } = await db().query<{
     id: string;
     email: string;
@@ -62,9 +83,18 @@ authRouter.post('/login', authLimiter, async (req, res) => {
     [mail],
   );
   const u = rows[0];
-  const fail = async (reason: string, message = 'Invalid email or password') => {
-    await audit(req, { action: 'auth.login_failed', entityType: 'user', entityId: u?.id ?? null, actorId: u?.id ?? null, actorEmail: mail, metadata: { reason, portal } });
-    throw new AppError(401, message, 'invalid_credentials');
+  // One message (and one bcrypt cost) for every failure so responses never reveal whether an
+  // account exists, is locked, or is deactivated.
+  const fail = async (reason: string) => {
+    await audit(req, {
+      action: 'auth.login_failed',
+      entityType: 'user',
+      entityId: u?.id ?? null,
+      actorId: u?.id ?? null,
+      actorEmail: mail,
+      metadata: { reason },
+    });
+    throw new AppError(401, GENERIC_LOGIN_ERROR, 'invalid_credentials');
   };
 
   if (!u || !u.password_hash) {
@@ -72,36 +102,139 @@ authRouter.post('/login', authLimiter, async (req, res) => {
     return fail(u ? 'invite_pending' : 'unknown_email');
   }
   if (u.locked_until && new Date(u.locked_until).getTime() > Date.now()) {
-    return fail('locked', `Too many failed attempts. Try again in ${LOCK_MINUTES} minutes.`);
+    await burnPasswordCheck(pwd);
+    return fail('locked');
   }
   if (!(await verifyPassword(pwd, u.password_hash))) {
-    const attempts = u.failed_login_attempts + 1;
-    const lock = attempts >= MAX_FAILED;
-    await db().query(
-      `UPDATE users SET failed_login_attempts = $2, locked_until = $3 WHERE id = $1`,
-      [u.id, lock ? 0 : attempts, lock ? new Date(Date.now() + LOCK_MINUTES * 60_000) : null],
-    );
-    return fail(lock ? 'locked_now' : 'bad_password');
+    const locked = await recordFailedAttempt(db(), u.id);
+    return fail(locked ? 'locked_now' : 'bad_password');
   }
-  if (u.status !== 'active') return fail('inactive', 'This account has been deactivated. Contact your administrator.');
+  if (u.status !== 'active') return fail('inactive');
 
-  const allowed: Record<typeof portal, RoleName[]> = { admin: ['admin', 'staff'], employee: ['employee'] };
-  if (!allowed[portal].includes(u.role)) {
-    await audit(req, { action: 'auth.login_wrong_portal', entityType: 'user', entityId: u.id, actorId: u.id, actorEmail: u.email, metadata: { portal } });
-    throw new AppError(
-      403,
-      portal === 'admin' ? 'Employees must sign in through the Employee portal.' : 'Administrators and staff must sign in through the Admin portal.',
-      'wrong_portal',
-    );
+  // Second factor: the password alone never yields a session when MFA is enabled.
+  const authUser = (await loadAuthUser(u.id))!;
+  if (authUser.mfaEnabled) {
+    await audit(req, { action: 'auth.password_verified', entityType: 'user', entityId: u.id, actorId: u.id, actorEmail: u.email });
+    res.json({ mfaRequired: true, mfaToken: signMfaToken(u.id) });
+    return;
   }
+  await completeLogin(req, res, u.id, 'password');
+});
 
-  await db().query(`UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now() WHERE id = $1`, [u.id]);
-  const session = await createSession(u.id, { ip: clientIp(req), userAgent: userAgent(req) });
-  const user = (await loadAuthUser(u.id))!;
-  await audit(req, { action: 'auth.login', entityType: 'user', entityId: u.id, actorId: u.id, actorEmail: u.email, metadata: { portal } });
-
+/** Final step of any successful sign-in: resets counters, opens a session and returns tokens. */
+async function completeLogin(req: Request, res: Response, userId: string, method: 'password' | 'totp' | 'recovery') {
+  await db().query(`UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now() WHERE id = $1`, [userId]);
+  const session = await createSession(userId, { ip: clientIp(req), userAgent: userAgent(req) });
+  const user = (await loadAuthUser(userId))!;
+  await audit(req, { action: 'auth.login', entityType: 'user', entityId: userId, actorId: userId, actorEmail: user.email, metadata: { method } });
   setRefreshCookie(res, session.refreshToken, session.expiresAt);
-  res.json({ accessToken: signAccessToken(u.id, session.sessionId, u.role), user: serializeAuthUser(user) });
+  res.json({ accessToken: signAccessToken(userId, session.sessionId, user.role), user: serializeAuthUser(user) });
+}
+
+// ---- POST /api/auth/login/mfa ----------------------------------------------------------
+const mfaLoginSchema = z.object({ mfaToken: z.string().min(10).max(2000), code: z.string().trim().min(6).max(20) });
+
+authRouter.post('/login/mfa', authLimiter, async (req, res) => {
+  const { mfaToken, code } = parse(mfaLoginSchema, req.body);
+  let claims;
+  try {
+    claims = verifyMfaToken(mfaToken);
+  } catch {
+    throw new AppError(401, 'Your sign-in attempt expired. Please enter your password again.', 'mfa_expired');
+  }
+  const result = await db().tx(async (q) => {
+    const { rows } = await q.query<{ status: string; email: string; locked_until: Date | null }>(
+      'SELECT status, email, locked_until FROM users WHERE id = $1 FOR UPDATE',
+      [claims.sub],
+    );
+    const u = rows[0];
+    if (!u || u.status !== 'active') return { ok: false as const, message: 'This account is not active.' };
+    if (u.locked_until && new Date(u.locked_until).getTime() > Date.now()) {
+      return { ok: false as const, message: `Too many failed attempts. Try again in ${LOCK_MINUTES} minutes.` };
+    }
+    const method = await verifyUserMfa(claims.sub, code, q);
+    if (!method) {
+      const lock = await recordFailedAttempt(q, claims.sub);
+      await audit(
+        req,
+        { action: 'auth.mfa_failed', entityType: 'user', entityId: claims.sub, actorId: claims.sub, actorEmail: u.email, metadata: { locked: lock } },
+        q,
+      );
+      return { ok: false as const, message: lock ? `Too many failed attempts. Try again in ${LOCK_MINUTES} minutes.` : 'That code is not valid.' };
+    }
+    if (method === 'recovery') {
+      await audit(req, { action: 'auth.mfa_recovery_code_used', entityType: 'user', entityId: claims.sub, actorId: claims.sub, actorEmail: u.email }, q);
+    }
+    return { ok: true as const, method };
+  });
+  if (!result.ok) throw new AppError(401, result.message, 'mfa_invalid');
+  await completeLogin(req, res, claims.sub, result.method);
+});
+
+// ---- MFA self-service (enrollment / recovery codes / disable) ---------------------------------
+authRouter.post('/mfa/setup', authenticate, authLimiter, async (req, res) => {
+  const user = currentUser(req);
+  if (user.mfaEnabled) throw badRequest('Two-factor authentication is already enabled');
+  res.json(await startEnrollment(user.id, user.email));
+});
+
+authRouter.post('/mfa/enable', authenticate, authLimiter, async (req, res) => {
+  const user = currentUser(req);
+  const { code } = parse(z.object({ code: z.string().trim().length(6, 'Enter the 6-digit code') }), req.body);
+  const recoveryCodes = await db().tx(async (q) => {
+    const codes = await confirmEnrollment(user.id, code, q);
+    // Any other existing sessions were opened without the second factor: sign them out.
+    await q.query(
+      `UPDATE auth_sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL
+          AND family_id <> (SELECT family_id FROM auth_sessions WHERE id = $2)`,
+      [user.id, req.sessionId],
+    );
+    await audit(req, { action: 'auth.mfa_enabled', entityType: 'user', entityId: user.id }, q);
+    return codes;
+  });
+  res.json({ recoveryCodes });
+});
+
+const reauthSchema = z.object({ password: z.string().min(1).max(128), code: z.string().trim().min(6).max(20) });
+
+/** Re-authenticates with password + current second factor before sensitive MFA changes. */
+async function reauthenticate(req: Request, q: Queryable) {
+  const user = currentUser(req);
+  const b = parse(reauthSchema, req.body);
+  const { rows } = await q.query<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = $1', [user.id]);
+  const okPwd = !!rows[0]?.password_hash && (await verifyPassword(b.password, rows[0].password_hash));
+  const okCode = okPwd && (await verifyUserMfa(user.id, b.code, q));
+  if (!okPwd || !okCode) throw badRequest('Validation failed', { fields: { [okPwd ? 'code' : 'password']: okPwd ? 'Invalid code' : 'Incorrect password' } });
+  return user;
+}
+
+authRouter.post('/mfa/recovery-codes', authenticate, authLimiter, async (req, res) => {
+  const recoveryCodes = await db().tx(async (q) => {
+    const user = await reauthenticate(req, q);
+    const codes = await regenerateRecoveryCodes(user.id, q);
+    await audit(req, { action: 'auth.mfa_recovery_codes_regenerated', entityType: 'user', entityId: user.id }, q);
+    return codes;
+  });
+  res.json({ recoveryCodes });
+});
+
+authRouter.post('/mfa/disable', authenticate, authLimiter, async (req, res) => {
+  if (mfaRequiredRoles.has(currentUser(req).role)) throw badRequest('Two-factor authentication is required for your role and cannot be turned off');
+  await db().tx(async (q) => {
+    const user = await reauthenticate(req, q);
+    await clearMfa(user.id, q);
+    await audit(req, { action: 'auth.mfa_disabled', entityType: 'user', entityId: user.id }, q);
+  });
+  res.json({ ok: true });
+});
+
+authRouter.get('/mfa', authenticate, async (req, res) => {
+  const user = currentUser(req);
+  res.json({
+    enabled: user.mfaEnabled,
+    required: mfaRequiredRoles.has(user.role),
+    recoveryCodesRemaining: user.mfaEnabled ? await remainingRecoveryCodes(user.id) : 0,
+  });
 });
 
 // ---- POST /api/auth/refresh ------------------------------------------------------------
@@ -110,6 +243,8 @@ authRouter.post('/refresh', requireXhr, async (req, res) => {
   if (!token || typeof token !== 'string') throw unauthorized('No session');
   const r = await rotateSession(token, { ip: clientIp(req), userAgent: userAgent(req) });
   if (!r.ok) {
+    // Another tab rotated this token a moment ago: keep the (newer) cookie and let the client retry.
+    if (r.reason === 'race') throw new AppError(409, 'Session refresh already in progress', 'refresh_race');
     clearRefreshCookie(res);
     if (r.reason === 'reused') await audit(req, { action: 'auth.refresh_reuse_detected', metadata: {} });
     throw unauthorized('Session expired');
@@ -129,14 +264,14 @@ authRouter.post('/logout', requireXhr, async (req, res) => {
 
 // ---- Invitations -------------------------------------------------------------------------
 authRouter.get('/invitations/:token', authLimiter, async (req, res) => {
-  const t = await findValidUserToken(String(req.params.token), 'invite');
+  const t = await findValidUserToken(String(req.params.token), ['invite', 'password_reset']);
   if (!t) throw new AppError(410, 'This invitation link is invalid or has expired', 'invite_invalid');
   const { rows } = await db().query<{ email: string; first_name: string; last_name: string; role: RoleName }>(
     `SELECT u.email, u.first_name, u.last_name, r.name AS role FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = $1`,
     [t.user_id],
   );
   const u = rows[0];
-  res.json({ email: u.email, firstName: u.first_name, lastName: u.last_name, portal: u.role === 'employee' ? 'employee' : 'admin' });
+  res.json({ email: u.email, firstName: u.first_name, lastName: u.last_name, purpose: t.purpose });
 });
 
 const acceptSchema = z.object({ token: z.string().min(10).max(200), password });
@@ -144,72 +279,36 @@ const acceptSchema = z.object({ token: z.string().min(10).max(200), password });
 authRouter.post('/accept-invite', authLimiter, async (req, res) => {
   const { token, password: pwd } = parse(acceptSchema, req.body);
   const hash = await hashPassword(pwd);
-  const result = await db().tx(async (q) => {
-    const t = await findValidUserToken(token, 'invite', q);
-    if (!t) throw new AppError(410, 'This invitation link is invalid or has expired', 'invite_invalid');
-    const { rows } = await q.query<{ status: string; email: string; role: RoleName }>(
-      `SELECT u.status, u.email, r.name AS role FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = $1 FOR UPDATE OF u`,
-      [t.user_id],
-    );
+  await db().tx(async (q) => {
+    const t = await findValidUserToken(token, ['invite', 'password_reset'], q);
+    if (!t) throw new AppError(410, 'This link is invalid or has expired', 'invite_invalid');
+    const { rows } = await q.query<{ status: string; email: string }>(`SELECT status, email FROM users WHERE id = $1 FOR UPDATE`, [t.user_id]);
     if (rows[0].status === 'deactivated') throw badRequest('This account has been deactivated');
     await q.query(`UPDATE user_tokens SET used_at = now() WHERE id = $1`, [t.id]);
     await q.query(
       `UPDATE users SET password_hash = $2, status = 'active', password_changed_at = now(), failed_login_attempts = 0, locked_until = NULL WHERE id = $1`,
       [t.user_id, hash],
     );
-    await audit(req, { action: 'auth.invite_accepted', entityType: 'user', entityId: t.user_id, actorId: t.user_id, actorEmail: rows[0].email }, q);
-    return { portal: rows[0].role === 'employee' ? 'employee' : 'admin' };
+    // A reset means the old password may be compromised: end every existing session.
+    if (t.purpose === 'password_reset') await revokeAllSessions(t.user_id, q);
+    await audit(
+      req,
+      {
+        action: t.purpose === 'invite' ? 'auth.invite_accepted' : 'auth.password_reset',
+        entityType: 'user',
+        entityId: t.user_id,
+        actorId: t.user_id,
+        actorEmail: rows[0].email,
+      },
+      q,
+    );
   });
-  res.json(result);
+  res.json({ ok: true });
 });
 
 // ---- Authenticated self-service --------------------------------------------------------------
-authRouter.get('/me', authenticate, async (req, res) => {
-  const user = currentUser(req);
-  const { rows } = await db().query<Record<string, unknown>>(
-    `SELECT u.phone, u.job_title, u.last_login_at, u.created_at,
-            e.employee_number, e.department, e.position, e.hire_date,
-            c.id AS client_id, c.name AS client_name
-       FROM users u
-       LEFT JOIN employees e ON e.user_id = u.id
-       LEFT JOIN clients c ON c.id = e.client_id
-      WHERE u.id = $1`,
-    [user.id],
-  );
-  const p = rows[0];
-  res.json({
-    user: serializeAuthUser(user),
-    profile: {
-      phone: p.phone,
-      jobTitle: p.job_title,
-      lastLoginAt: p.last_login_at,
-      createdAt: p.created_at,
-      employeeNumber: p.employee_number,
-      department: p.department,
-      position: p.position,
-      hireDate: p.hire_date,
-      clientId: p.client_id,
-      clientName: p.client_name,
-    },
-  });
-});
-
-const profileSchema = z.object({
-  firstName: nonEmpty(100),
-  lastName: nonEmpty(100),
-  phone: trimmed(40).optional().nullable(),
-  jobTitle: trimmed(100).optional().nullable(),
-});
-
-authRouter.patch('/profile', authenticate, async (req, res) => {
-  const user = currentUser(req);
-  const b = parse(profileSchema, req.body);
-  await db().query(
-    `UPDATE users SET first_name = $2, last_name = $3, phone = NULLIF($4, ''), job_title = NULLIF($5, '') WHERE id = $1`,
-    [user.id, b.firstName, b.lastName, b.phone ?? null, b.jobTitle ?? null],
-  );
-  await audit(req, { action: 'user.profile_updated', entityType: 'user', entityId: user.id });
-  res.json({ ok: true });
+authRouter.get('/me', authenticate, (req, res) => {
+  res.json({ user: serializeAuthUser(currentUser(req)) });
 });
 
 const changePasswordSchema = z

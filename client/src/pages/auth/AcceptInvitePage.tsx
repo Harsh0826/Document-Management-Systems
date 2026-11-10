@@ -22,7 +22,7 @@ export const PASSWORD_RULES = [
 export const passwordSchema = z
   .string()
   .min(10, 'At least 10 characters')
-  .max(128)
+  .max(72, 'At most 72 characters')
   .regex(/[a-z]/, 'Must contain a lowercase letter')
   .regex(/[A-Z]/, 'Must contain an uppercase letter')
   .regex(/[0-9]/, 'Must contain a number');
@@ -52,7 +52,12 @@ export default function AcceptInvitePage() {
   const navigate = useNavigate();
   const invite = useQuery({
     queryKey: ['invite', token],
-    queryFn: async () => (await api.get<{ email: string; firstName: string; lastName: string; portal: 'admin' | 'employee' }>(`/auth/invitations/${encodeURIComponent(token)}`)).data,
+    queryFn: async () =>
+      (
+        await api.get<{ email: string; firstName: string; lastName: string; purpose: 'invite' | 'password_reset' }>(
+          `/auth/invitations/${encodeURIComponent(token)}`,
+        )
+      ).data,
     enabled: !!token,
     retry: false,
   });
@@ -61,9 +66,9 @@ export default function AcceptInvitePage() {
 
   const onSubmit = form.handleSubmit(async (v) => {
     try {
-      const { data } = await api.post<{ portal: 'admin' | 'employee' }>('/auth/accept-invite', { token, password: v.password });
+      await api.post('/auth/accept-invite', { token, password: v.password });
       toast.success('Password set. You can now sign in.');
-      navigate(`/login/${data.portal}`, { replace: true });
+      navigate('/login', { replace: true });
     } catch (err) {
       if (!applyFieldErrors(err, form.setError)) toast.error(errorMessage(err));
     }
@@ -77,7 +82,9 @@ export default function AcceptInvitePage() {
             <CircleAlert className="size-6" />
           </div>
           <h2 className="mt-4 text-xl font-semibold">Invitation link not valid</h2>
-          <p className="mt-2 text-sm text-muted-foreground">This link is invalid, already used, or has expired. Ask your administrator to send a new invitation.</p>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This link is invalid, already used, or has expired. Ask your administrator to send a new invitation.
+          </p>
           <Button asChild variant="outline" className="mt-6">
             <Link to="/login">Go to sign in</Link>
           </Button>
@@ -89,9 +96,12 @@ export default function AcceptInvitePage() {
           <span className="flex size-11 items-center justify-center rounded-xl bg-blue-50 text-primary">
             <KeyRound className="size-5" />
           </span>
-          <h2 className="mt-4 text-2xl font-semibold tracking-tight">Welcome, {invite.data?.firstName}</h2>
+          <h2 className="mt-4 text-2xl font-semibold tracking-tight">
+            {invite.data?.purpose === 'password_reset' ? 'Reset your password' : `Welcome, ${invite.data?.firstName}`}
+          </h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Create a password for <span className="font-medium text-foreground">{invite.data?.email}</span>.
+            {invite.data?.purpose === 'password_reset' ? 'Choose a new password for' : 'Create a password for'}{' '}
+            <span className="font-medium text-foreground">{invite.data?.email}</span>.
           </p>
           <form onSubmit={onSubmit} className="mt-6 space-y-5" noValidate>
             <Field label="New password" error={form.formState.errors.password?.message}>

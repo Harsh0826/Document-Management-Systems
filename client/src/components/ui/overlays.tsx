@@ -1,15 +1,20 @@
-import { AlertDialog as AD, Dialog as D, DropdownMenu as DM, Popover as P, Tabs as T, Tooltip as TT } from 'radix-ui';
+import { AlertDialog as AD, Dialog as D, DropdownMenu as DM } from 'radix-ui';
 import { X } from 'lucide-react';
-import { useState, type ComponentProps, type ReactNode } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from './button';
 
 // ------------------------------------------------------------------ Dialog
 export const Dialog = D.Root;
-export const DialogTrigger = D.Trigger;
-export const DialogClose = D.Close;
 
-export function DialogContent({ className, children, title, description, size = 'md', ...props }: ComponentProps<typeof D.Content> & { title: ReactNode; description?: ReactNode; size?: 'sm' | 'md' | 'lg' | 'xl' | 'full' }) {
+export function DialogContent({
+  className,
+  children,
+  title,
+  description,
+  size = 'md',
+  ...props
+}: ComponentProps<typeof D.Content> & { title: ReactNode; description?: ReactNode; size?: 'sm' | 'md' | 'lg' | 'xl' | 'full' }) {
   const sizes = { sm: 'max-w-md', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl', full: 'max-w-6xl' };
   return (
     <D.Portal>
@@ -25,7 +30,11 @@ export function DialogContent({ className, children, title, description, size = 
         <div className="flex items-start justify-between gap-4 border-b px-6 py-4">
           <div className="min-w-0">
             <D.Title className="text-base font-semibold">{title}</D.Title>
-            {description ? <D.Description className="mt-1 text-sm text-muted-foreground">{description}</D.Description> : <D.Description className="sr-only">{String(title)}</D.Description>}
+            {description ? (
+              <D.Description className="mt-1 text-sm text-muted-foreground">{description}</D.Description>
+            ) : (
+              <D.Description className="sr-only">{String(title)}</D.Description>
+            )}
           </div>
           <D.Close className="-mr-2 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Close">
             <X className="size-4" />
@@ -73,7 +82,9 @@ export function ConfirmDialog({
           {children}
           <div className="mt-6 flex justify-end gap-2">
             <AD.Cancel asChild>
-              <Button variant="outline" disabled={loading}>Cancel</Button>
+              <Button variant="outline" disabled={loading}>
+                Cancel
+              </Button>
             </AD.Cancel>
             <Button variant={tone === 'destructive' ? 'destructive' : 'default'} loading={loading} onClick={onConfirm}>
               {confirmLabel}
@@ -83,12 +94,6 @@ export function ConfirmDialog({
       </AD.Portal>
     </AD.Root>
   );
-}
-
-/** Hook-style helper: const confirm = useConfirm(); confirm.open({...}) */
-export function useDisclosure(initial = false) {
-  const [open, setOpen] = useState(initial);
-  return { open, setOpen, onOpen: () => setOpen(true), onClose: () => setOpen(false) };
 }
 
 // ------------------------------------------------------------------ Dropdown menu
@@ -123,49 +128,6 @@ export function DropdownMenuItem({ className, destructive, ...props }: Component
 }
 
 export const DropdownMenuSeparator = () => <DM.Separator className="-mx-1 my-1 h-px bg-border" />;
-export const DropdownMenuLabel = ({ children }: { children: ReactNode }) => <DM.Label className="px-2.5 py-1.5 text-xs font-medium text-muted-foreground">{children}</DM.Label>;
-
-// ------------------------------------------------------------------ Popover
-export const Popover = P.Root;
-export const PopoverTrigger = P.Trigger;
-export function PopoverContent({ className, align = 'end', ...props }: ComponentProps<typeof P.Content>) {
-  return (
-    <P.Portal>
-      <P.Content align={align} sideOffset={8} collisionPadding={8} className={cn('z-50 rounded-xl border bg-card shadow-xl data-[state=open]:animate-in focus:outline-none', className)} {...props} />
-    </P.Portal>
-  );
-}
-
-// ------------------------------------------------------------------ Tabs
-export const Tabs = T.Root;
-export function TabsList({ className, ...props }: ComponentProps<typeof T.List>) {
-  return <T.List className={cn('scroll-thin inline-flex h-9 max-w-full items-center gap-1 overflow-x-auto rounded-lg bg-secondary p-1', className)} {...props} />;
-}
-export function TabsTrigger({ className, ...props }: ComponentProps<typeof T.Trigger>) {
-  return (
-    <T.Trigger
-      className={cn(
-        'inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium text-muted-foreground transition-all hover:text-foreground data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm',
-        className,
-      )}
-      {...props}
-    />
-  );
-}
-export const TabsContent = ({ className, ...props }: ComponentProps<typeof T.Content>) => <T.Content className={cn('mt-4 focus:outline-none', className)} {...props} />;
-
-// ------------------------------------------------------------------ Tooltip
-export function Tooltip({ content, children }: { content: ReactNode; children: ReactNode }) {
-  return (
-    <TT.Provider delayDuration={300}>
-      <TT.Root>
-        <TT.Trigger asChild>{children}</TT.Trigger>
-        <TT.Portal>
-          <TT.Content sideOffset={6} className="z-50 rounded-md bg-navy px-2.5 py-1.5 text-xs text-white shadow-md data-[state=delayed-open]:animate-in">
-            {content}
-          </TT.Content>
-        </TT.Portal>
-      </TT.Root>
-    </TT.Provider>
-  );
-}
+export const DropdownMenuLabel = ({ children }: { children: ReactNode }) => (
+  <DM.Label className="px-2.5 py-1.5 text-xs font-medium text-muted-foreground">{children}</DM.Label>
+);

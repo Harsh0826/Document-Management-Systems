@@ -10,28 +10,28 @@ import { pinoHttp } from 'pino-http';
 import { env, isProd } from './config/env.js';
 import { AppError } from './lib/errors.js';
 import { logger } from './lib/logger.js';
-import { apiLimiter } from './middleware/security.js';
+import { apiLimiter, requestId } from './middleware/security.js';
+import { activeStorageOrigin } from './services/storage.js';
 import { authRouter } from './routes/auth.routes.js';
-import { categoriesRouter, clientsRouter, employeesRouter } from './routes/clients.routes.js';
-import { documentsRouter } from './routes/documents.routes.js';
-import { foldersRouter } from './routes/folders.routes.js';
-import { auditRouter, dashboardRouter, filesRouter, notificationsRouter } from './routes/misc.routes.js';
-import { requestsRouter } from './routes/requests.routes.js';
-import { usersRouter } from './routes/users.routes.js';
+import { libraryRouter } from './routes/library.routes.js';
+import { auditRouter, filesRouter } from './routes/misc.routes.js';
+import { peopleRouter } from './routes/people.routes.js';
+import { storageRouter } from './routes/storage.routes.js';
 
-/** Origins the SPA may load signed file URLs from (S3 / MinIO) for in-app previews. */
-function storageOrigins(): string[] {
-  if (env.STORAGE_DRIVER !== 's3') return [];
-  if (env.S3_ENDPOINT) return [new URL(env.S3_ENDPOINT).origin];
-  return [`https://${env.S3_BUCKET}.s3.${env.AWS_REGION}.amazonaws.com`, `https://s3.${env.AWS_REGION}.amazonaws.com`];
-}
+/**
+ * Origin the SPA may load signed file URLs from for in-app previews: only the active bucket's own
+ * endpoint (never every bucket in the region). Evaluated per request so it follows a runtime switch.
+ */
+const fileOrigin = () => activeStorageOrigin() ?? "'self'";
+
+/** Masks secrets that travel in URL paths (invitation/reset tokens, signed file tokens). */
+export const redactUrl = (url: string) => url.replace(/(\/api\/auth\/invitations\/)[^/?]+/, '$1[redacted]').replace(/(\/api\/files\/)[^/?]+/, '$1[redacted]');
 
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', env.TRUST_PROXY);
 
-  const fileOrigins = storageOrigins();
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -40,8 +40,8 @@ export function createApp() {
           scriptSrc: ["'self'"],
           styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
           fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
-          imgSrc: ["'self'", 'data:', 'blob:', ...fileOrigins],
-          frameSrc: ["'self'", ...fileOrigins],
+          imgSrc: ["'self'", 'data:', 'blob:', fileOrigin],
+          frameSrc: ["'self'", fileOrigin],
           connectSrc: ["'self'"],
           objectSrc: ["'none'"],
           frameAncestors: ["'self'"],
@@ -52,10 +52,24 @@ export function createApp() {
       strictTransportSecurity: isProd ? { maxAge: 31536000, includeSubDomains: true } : false,
     }),
   );
+  app.use(requestId);
   app.use(compression());
-  app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/api/health' } }));
+  app.use(
+    pinoHttp({
+      logger,
+      genReqId: (req) => (req as unknown as { id: string }).id,
+      autoLogging: { ignore: (req) => req.url === '/api/health' },
+      // Invite/reset tokens and signed file tokens live in URLs: never write them to logs.
+      serializers: {
+        req: (r: { id: string; method: string; url: string }) => ({ id: r.id, method: r.method, url: redactUrl(r.url) }),
+      },
+    }),
+  );
+  app.use((_req, res, next) => {
+    res.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+    next();
+  });
   app.use(express.json({ limit: '200kb' }));
-  app.use(express.urlencoded({ extended: false, limit: '200kb' }));
   app.use(cookieParser());
 
   // API responses are never cached by browsers or proxies.
@@ -69,17 +83,11 @@ export function createApp() {
 
   app.use('/api', apiLimiter);
   app.use('/api/auth', authRouter);
-  app.use('/api/users', usersRouter);
-  app.use('/api/clients', clientsRouter);
-  app.use('/api/employees', employeesRouter);
-  app.use('/api/categories', categoriesRouter);
-  app.use('/api/documents', documentsRouter);
-  app.use('/api/folders', foldersRouter);
-  app.use('/api/requests', requestsRouter);
-  app.use('/api/notifications', notificationsRouter);
+  app.use('/api/library', libraryRouter);
+  app.use('/api/people', peopleRouter);
   app.use('/api/audit-logs', auditRouter);
-  app.use('/api/dashboard', dashboardRouter);
   app.use('/api/files', filesRouter);
+  app.use('/api/admin/storage', storageRouter);
 
   app.use('/api', (_req, _res, next) => next(new AppError(404, 'Endpoint not found', 'not_found')));
 
@@ -112,7 +120,7 @@ export function createApp() {
       return;
     }
     req.log?.error({ err }, 'Unhandled error');
-    res.status(500).json({ error: { code: 'internal', message: 'Something went wrong. Please try again.' } });
+    res.status(500).json({ error: { code: 'internal', message: 'Something went wrong. Please try again.', requestId: (req as Request & { id?: string }).id } });
   });
 
   return app;

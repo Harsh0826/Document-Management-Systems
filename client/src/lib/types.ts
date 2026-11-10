@@ -1,19 +1,4 @@
-export type Role = 'admin' | 'staff' | 'employee';
-export type DocumentStatus = 'pending_review' | 'approved' | 'rejected' | 'expired' | 'renewal_required';
-export type Permission =
-  | 'documents.view'
-  | 'documents.download'
-  | 'documents.upload'
-  | 'documents.edit'
-  | 'documents.review'
-  | 'documents.archive'
-  | 'documents.delete'
-  | 'documents.comment'
-  | 'folders.manage'
-  | 'requests.manage'
-  | 'users.manage'
-  | 'clients.manage'
-  | 'audit.view';
+export type Role = 'admin' | 'employee';
 
 export interface SessionUser {
   id: string;
@@ -21,264 +6,97 @@ export interface SessionUser {
   firstName: string;
   lastName: string;
   role: Role;
-  permissions: Permission[];
-  employeeId: string | null;
-  clientId: string | null;
-  clientIds: string[];
+  mfaEnabled: boolean;
+  mfaSetupRequired: boolean;
 }
 
-export interface Paged<T> {
-  items: T[];
-  total: number;
-  page: number;
-  pageSize: number;
-}
-
-export type DocAction = 'download' | 'replace' | 'edit' | 'edit_dates' | 'move' | 'review' | 'archive' | 'delete' | 'comment' | 'comment_internal';
-
-export interface DocumentItem {
-  id: string;
-  title: string;
-  description: string | null;
-  status: DocumentStatus;
-  issueDate: string | null;
-  expiryDate: string | null;
-  daysToExpiry: number | null;
-  isArchived: boolean;
-  archivedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-  clientId: string;
-  clientName: string;
-  employeeId: string;
-  employeeName: string;
-  employeeNumber: string | null;
-  categoryId: string | null;
-  categoryName: string | null;
-  isCertificate: boolean;
-  folderId: string | null;
-  folderName: string | null;
-  file: { versionId: string; versionNumber: number; filename: string; ext: string; mimeType: string; sizeBytes: number } | null;
-  uploadedAt: string | null;
-  uploadedById: string | null;
-  uploadedByName: string | null;
-  can: Record<DocAction, boolean>;
-}
-
-export interface DocumentVersion {
-  id: string;
-  versionNumber: number;
-  filename: string;
-  ext: string;
-  mimeType: string;
-  sizeBytes: number;
-  checksum: string;
-  issueDate: string | null;
-  expiryDate: string | null;
-  changeNote: string | null;
-  createdAt: string;
-  uploadedByName: string | null;
-}
-
-export interface DocumentDetail extends DocumentItem {
-  folderPath: { id: string; name: string; kind: string }[];
-  versions: DocumentVersion[];
-  approvals: { id: string; decision: 'approved' | 'rejected' | 'renewal_required'; comment: string | null; createdAt: string; versionNumber: number | null; reviewerName: string | null }[];
-  comments: DocComment[];
-}
-
-export interface DocComment {
-  id: string;
-  body: string;
-  isInternal: boolean;
-  createdAt: string;
-  authorId: string | null;
-  authorName: string | null;
-  authorRole: Role | null;
-}
-
-export interface Category {
+export interface FolderCrumb {
   id: string;
   name: string;
-  slug: string;
-  description: string | null;
-  isCertificate: boolean;
-  requiresExpiry: boolean;
-  sortOrder: number;
-  documentCount: number;
 }
 
-export interface Client {
-  id: string;
-  name: string;
-  code: string;
-  industry: string | null;
-  contactEmail: string | null;
-  isActive: boolean;
-  createdAt: string;
-  employeeCount: number;
-  documentCount: number;
-  pendingCount: number;
-  staffCount: number;
-}
-
-export interface Employee {
-  id: string;
-  userId: string;
-  clientId: string;
-  clientName: string;
-  employeeNumber: string | null;
-  department: string | null;
-  position: string | null;
-  hireDate: string | null;
-  firstName: string;
-  lastName: string;
-  email: string;
-  status: string;
-  documentCount: number;
-  pendingCount: number;
-  expiredCount: number;
-  openRequestCount: number;
-}
-
-export interface Folder {
+export interface LibraryFolder {
   id: string;
   name: string;
   parentId: string | null;
-  clientId: string;
-  employeeId: string | null;
-  categoryId: string | null;
-  kind: 'client_root' | 'employee_root' | 'category' | 'custom';
-  documentCount: number;
-  childCount: number;
-  isSystem: boolean;
+  depth: number;
+  fileCount: number;
+  folderCount: number;
+  /** Where the folder lives, top-level first (empty for top-level folders). */
+  parents: FolderCrumb[];
 }
 
-export interface FolderDetail extends Folder {
-  path: { id: string; name: string; kind: string }[];
-  children: Folder[];
-}
-
-export interface UserListItem {
+export interface LibraryFile {
   id: string;
-  email: string;
-  firstName: string;
-  lastName: string;
-  status: 'invited' | 'active' | 'deactivated';
-  role: Role;
-  jobTitle: string | null;
-  lastLoginAt: string | null;
-  createdAt: string;
-  employeeId: string | null;
-  employeeNumber: string | null;
-  department: string | null;
-  clientId: string | null;
-  clientName: string | null;
-  assignedClientCount: number;
-  documentCount: number;
-}
-
-export interface UserDetail {
-  id: string;
-  email: string;
-  firstName: string;
-  lastName: string;
-  phone: string | null;
-  jobTitle: string | null;
-  status: 'invited' | 'active' | 'deactivated';
-  role: Role;
-  lastLoginAt: string | null;
-  createdAt: string;
-  lockedUntil: string | null;
-  employee: {
-    id: string;
-    clientId: string;
-    clientName: string;
-    employeeNumber: string | null;
-    department: string | null;
-    position: string | null;
-    hireDate: string | null;
-    documentCount: number;
-  } | null;
-  grantedPermissions: Permission[];
-  rolePermissions: Permission[];
-  assignedClients: { id: string; name: string; code: string }[];
-}
-
-export interface PermissionInfo {
-  key: Permission;
-  description: string;
-  grantableToStaff: boolean;
-}
-
-export interface NotificationItem {
-  id: string;
+  name: string;
+  folderId: string;
+  folderPath: FolderCrumb[];
+  validUntil: string | null;
+  daysLeft: number | null;
+  addedAt: string;
+  updatedAt: string;
+  isNew: boolean;
+  /** Plain-language type: "PDF", "Word document", "Excel sheet", "Picture" */
   type: string;
-  title: string;
-  message: string;
-  link: string | null;
-  entityType: string | null;
-  entityId: string | null;
-  isRead: boolean;
-  createdAt: string;
+  ext: string;
+  sizeBytes: number;
+  previewable: boolean;
+  // administrators only
+  uploadedByName?: string | null;
+  originalFilename?: string;
+  deletedAt?: string | null;
+  removedForGoodAt?: string;
 }
 
-export interface AuditEntry {
+export interface FolderDetail extends LibraryFolder {
+  path: FolderCrumb[];
+  subfolders: LibraryFolder[];
+  /** Files directly in this folder (fileCount includes sub-folders). */
+  ownFileCount: number;
+  pinned: boolean;
+}
+
+export interface HomeData {
+  folders: LibraryFolder[];
+  pinned: LibraryFolder[];
+  recent: LibraryFile[];
+  opened: LibraryFile[];
+  totals: { files: number; folders: number };
+  attention?: { expired: number; soon: number };
+}
+
+export type FileType = 'pdf' | 'word' | 'excel' | 'picture';
+export type Validity = 'expired' | 'soon' | 'valid' | 'none';
+export type Added = '7' | '30' | '365';
+export type FileSort = 'relevance' | 'newest' | 'oldest' | 'name' | 'name_desc' | 'expiry' | 'largest';
+
+/** What a list of documents is showing: where, which words, which filters, in which order. */
+export interface FileQuery {
+  q?: string;
+  folder?: string;
+  deep?: boolean;
+  type?: FileType;
+  validity?: Validity;
+  added?: Added;
+  sort?: FileSort;
+}
+
+export interface FilePage {
+  files: LibraryFile[];
+  nextOffset: number | null;
+  /** Only on the first page. */
+  total?: number;
+  totalIsCapped?: boolean;
+}
+
+export interface Person {
   id: string;
-  action: string;
-  entityType: string | null;
-  entityId: string | null;
-  actorId: string | null;
-  actorName: string | null;
-  actorEmail: string | null;
-  clientId: string | null;
-  clientName: string | null;
-  ip: string | null;
-  userAgent: string | null;
-  metadata: Record<string, unknown>;
-  documentTitle: string | null;
-  createdAt: string;
-}
-
-export interface DocumentRequest {
-  id: string;
-  clientId: string;
-  clientName: string;
-  employeeId: string;
-  employeeName: string;
-  categoryId: string | null;
-  categoryName: string | null;
-  title: string;
-  instructions: string | null;
-  dueDate: string | null;
-  daysUntilDue: number | null;
-  status: 'open' | 'fulfilled' | 'cancelled';
-  requestedByName: string | null;
-  fulfilledDocumentId: string | null;
-  fulfilledDocumentTitle: string | null;
-  fulfilledAt: string | null;
-  createdAt: string;
-}
-
-export interface Dashboard {
-  totals: {
-    employees: number;
-    documents: number;
-    pending: number;
-    approved: number;
-    rejected: number;
-    expired: number;
-    renewalRequired: number;
-    expiring30: number;
-    expiring60: number;
-    expiring90: number;
-    openRequests: number;
-    overdueRequests: number;
-  };
-  uploadsByMonth: { month: string; uploads: number }[];
-  byCategory: { name: string; count: number }[];
-  recentUploads: DocumentItem[];
-  pendingApprovals: DocumentItem[];
-  expiringSoon: DocumentItem[];
-  recentActivity: { id: string; action: string; entityType: string | null; entityId: string | null; documentTitle: string | null; metadata: Record<string, any>; actorName: string; createdAt: string }[];
+  firstName: string;
+  lastName: string;
+  email: string;
+  isAdmin: boolean;
+  status: 'invited' | 'active' | 'deactivated';
+  lastLoginAt: string | null;
+  addedAt: string;
+  twoStepOn: boolean;
 }

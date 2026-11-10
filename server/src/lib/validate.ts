@@ -31,10 +31,6 @@ export const isoDate = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD')
   .refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid date');
 /** Optional date coming from a form: '' or null → null. */
-export const optionalDate = z
-  .union([isoDate, z.literal(''), z.null()])
-  .optional()
-  .transform((v) => (v ? v : v === undefined ? undefined : null));
 export const trimmed = (max: number) => z.string().trim().max(max);
 export const nonEmpty = (max: number) => z.string().trim().min(1, 'Required').max(max);
 export const email = z.string().trim().toLowerCase().email('Invalid email address').max(254);
@@ -42,7 +38,8 @@ export const email = z.string().trim().toLowerCase().email('Invalid email addres
 export const password = z
   .string()
   .min(10, 'At least 10 characters')
-  .max(128, 'At most 128 characters')
+  .max(72, 'At most 72 characters')
+  .refine((s) => Buffer.byteLength(s, 'utf8') <= 72, 'Password is too long')
   .regex(/[a-z]/, 'Must contain a lowercase letter')
   .regex(/[A-Z]/, 'Must contain an uppercase letter')
   .regex(/[0-9]/, 'Must contain a number');
